@@ -58,3 +58,6 @@ the tool works. Background and done criteria: `../HANDOFF.md`.
 - 2026-10-30: languages done on a shared walker (`walk.rs`); `importers`, `--lang`, `--files`,
   `parse-errors` labels. 14/14 exact on four real repos after fixing TS `.js`→`.ts` imports and Rust
   turbofish / macro-argument calls. Next: code review, security review, push (private GitHub).
+- 2026-10-31: reviews done. Diff review (9 findings), whole-repo correctness review (8 + 2 likely)
+  and security review (5 confirmed + hardening) all fixed with tests; no injection holes found
+  (git args, SQL). Firefox/Chromium re-checked at the benchmarked commits: 8/8 exact, no-op update 0.75 s.

@@ -20,6 +20,24 @@ deleted after the runs. To re-clone them, use the commands in `questions*.json`.
 
 Chromium here is `chromium/src` only. DEPS-pulled repos (V8, Skia and others) are not included.
 
+## Regression after reviews (2026-10-31)
+
+The security and correctness fixes rewrote the walker and changed C++ handling. I re-ran both large
+corpora at the benchmarked commits. The index now covers all five languages, not just C/C++:
+
+| | Firefox @ 0b6146da78 | Chromium `src` @ 0b2cf11831 |
+|---|---|---|
+| Files indexed (all languages) | 221,530 | 180,469 |
+| Full index | 105 s, 1.7 GB peak RSS | 170 s, 1.8 GB peak RSS |
+| DB size | 2.24 GB | 3.01 GB |
+| No-op update | 0.76–0.83 s | 0.75 s |
+| Incremental, 200 files (Firefox HEAD) | 1.35–1.64 s | — |
+| 4 questions vs ground truth | 4/4 exact, 25–26 ms | 4/4 exact, 21–40 ms |
+
+The reviews caused one performance regression, caught here and fixed: the no-op update had grown
+to 4.5–5.8 s. Opening the write transaction preloaded every interned name, and `ls-tree -l` cost
+another 0.7 s. Names are now looked up lazily, and size limits are enforced while reading blobs.
+
 ## Other languages (2026-10-30, index alone vs independent ground truth)
 
 Shallow clones, deleted afterwards. Ground truth was built by `bench/language_truth.py` from

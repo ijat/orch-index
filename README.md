@@ -33,6 +33,20 @@ Common flags: `--path PREFIX`, `--lang cpp|rust|javascript|typescript|csharp`, `
 Sources are read from the git object store, so the index covers the whole committed tree even in a
 sparse worktree, and every hit's source line comes from the indexed blob.
 
+## Robustness
+
+The indexed repository is treated as untrusted input:
+- blobs over 4 MiB are skipped without being buffered in memory;
+- each file's walk is capped at depth 1024 and 5 s, and files cut short are labelled `parse-errors`;
+- non-UTF-8 paths are skipped;
+- extractor panics fail only their own file;
+- every printed field has control characters escaped, so file names and contents cannot forge
+  result rows or send terminal escapes.
+
+Concurrent `index` runs on one index wait for each other. The index records which extractor
+version built it: after an upgrade, queries report the index as stale until `orch-index index`
+runs again.
+
 ## Trust labels
 
 | Label | Meaning |

@@ -133,16 +133,12 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut names = HashMap::new();
-        {
-            let mut stmt = tx.prepare("SELECT id, name FROM names")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(0)?)))?;
-            for row in rows {
-                let (name, id) = row?;
-                names.insert(name, id);
-            }
-        }
-        Ok(Writer { tx, names })
+        // Names are looked up lazily: preloading millions of them would make a no-op update
+        // cost seconds.
+        Ok(Writer {
+            tx,
+            names: HashMap::new(),
+        })
     }
 
     fn name_id(&self, name: &str) -> Result<Option<i64>> {
@@ -348,10 +344,19 @@ impl Writer<'_> {
         if let Some(&id) = self.names.get(name) {
             return Ok(id);
         }
-        self.tx
-            .prepare_cached("INSERT INTO names (name) VALUES (?1)")?
-            .execute([name])?;
-        let id = self.tx.last_insert_rowid();
+        let existing: Option<i64> = self
+            .tx
+            .prepare_cached("SELECT id FROM names WHERE name = ?1")?
+            .query_row([name], |r| r.get(0))
+            .optional()?;
+        let id = if let Some(id) = existing {
+            id
+        } else {
+            self.tx
+                .prepare_cached("INSERT INTO names (name) VALUES (?1)")?
+                .execute([name])?;
+            self.tx.last_insert_rowid()
+        };
         self.names.insert(name.to_owned(), id);
         Ok(id)
     }

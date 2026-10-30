@@ -140,7 +140,7 @@ impl Indexer {
     }
 
     /// Reads blobs on one thread, extracts on the rayon pool, writes on the caller's thread.
-    /// Oversized blobs are never read; a panicking extractor fails only its own file.
+    /// Oversized blobs are discarded unbuffered; a panicking extractor fails only its own file.
     fn extract_into(
         &self,
         todo: Vec<(TreeEntry, Lang)>,
@@ -156,14 +156,10 @@ impl Indexer {
         thread::scope(|s| {
             let read = s.spawn(move || -> Result<()> {
                 for (entry, lang) in todo {
-                    let bytes = if entry.size > max {
-                        None
-                    } else {
-                        match reader.read(&entry.oid, max)? {
-                            Blob::Data(bytes) => Some(bytes),
-                            Blob::TooLarge(_) => None,
-                            Blob::Missing => continue,
-                        }
+                    let bytes = match reader.read(&entry.oid, max)? {
+                        Blob::Data(bytes) => Some(bytes),
+                        Blob::TooLarge(_) => None,
+                        Blob::Missing => continue,
                     };
                     if blob_tx.send((entry, lang, bytes)).is_err() {
                         break;

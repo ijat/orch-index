@@ -23,8 +23,6 @@ pub struct TreeEntry {
     pub path: String,
     /// Hex object id of the blob; changes exactly when the content changes.
     pub oid: String,
-    /// Blob size in bytes.
-    pub size: u64,
 }
 
 /// The blobs of a tree, plus what had to be left out.
@@ -91,14 +89,15 @@ impl Repo {
         Ok(PathBuf::from(String::from_utf8_lossy(&out).trim()))
     }
 
-    /// Lists every blob reachable from `rev`, recursively, with sizes. Symlinks and submodules
-    /// are skipped, and so are paths that are not valid UTF-8 (counted in
-    /// [`Tree::skipped_non_utf8`]): lossy decoding would make distinct paths collide.
+    /// Lists every blob reachable from `rev`, recursively. Symlinks and submodules are skipped,
+    /// and so are paths that are not valid UTF-8 (counted in [`Tree::skipped_non_utf8`]): lossy
+    /// decoding would make distinct paths collide. Sizes are not listed (`-l` triples the cost
+    /// of a no-op update); [`BlobReader::read`] enforces size limits instead.
     pub fn ls_tree(&self, rev: &str) -> Result<Tree> {
-        let out = self.run(&["ls-tree", "-r", "-z", "-l", "--full-tree", rev])?;
+        let out = self.run(&["ls-tree", "-r", "-z", "--full-tree", rev])?;
         let mut tree = Tree::default();
         for rec in out.split(|&b| b == 0).filter(|r| !r.is_empty()) {
-            // "<mode> SP <type> SP <oid> SP+ <size> TAB <path>"
+            // "<mode> SP <type> SP <oid> TAB <path>"
             let Some(tab) = rec.iter().position(|&b| b == b'\t') else {
                 continue;
             };
@@ -108,8 +107,7 @@ impl Repo {
             };
             let meta = String::from_utf8_lossy(&rec[..tab]);
             let mut parts = meta.split_whitespace();
-            let (Some(mode), Some(kind), Some(oid), Some(size)) =
-                (parts.next(), parts.next(), parts.next(), parts.next())
+            let (Some(mode), Some(kind), Some(oid)) = (parts.next(), parts.next(), parts.next())
             else {
                 continue;
             };
@@ -117,7 +115,6 @@ impl Repo {
                 tree.entries.push(TreeEntry {
                     path: path.to_owned(),
                     oid: oid.to_owned(),
-                    size: size.parse().unwrap_or(u64::MAX),
                 });
             }
         }
