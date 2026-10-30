@@ -325,6 +325,7 @@ name = "oi-lang"
 version = "0.1.0"
 dependencies = [
  "oi-model",
+ "serde",
  "thiserror",
  "tree-sitter",
  "tree-sitter-cpp",
@@ -377,6 +378,7 @@ dependencies = [
  "clap",
  "oi-git",
  "oi-indexer",
+ "oi-lang",
  "oi-model",
  "oi-query",
  "oi-store",

@@ -263,6 +263,15 @@ impl Store {
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
+    /// Number of indexed files whose parse had syntax errors.
+    pub fn files_with_errors(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM files WHERE errors > 0", [], |r| {
+                r.get(0)
+            })?)
+    }
+
     /// Row counts per table, for `stats`.
     pub fn counts(&self) -> Result<Vec<(&'static str, i64)>> {
         ["files", "names", "symbols", "refs", "includes", "bases"]
@@ -323,8 +332,16 @@ impl Writer<'_> {
         let basename = path.rsplit('/').next().unwrap_or(path);
         let base_id = self.intern(basename)?;
         self.tx
-            .prepare_cached("INSERT INTO files (path, oid, lang, base_id) VALUES (?1, ?2, ?3, ?4)")?
-            .execute(params![path, oid, lang.as_str(), base_id])?;
+            .prepare_cached(
+                "INSERT INTO files (path, oid, lang, errors, base_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
+                path,
+                oid,
+                lang.as_str(),
+                facts.parse_errors,
+                base_id
+            ])?;
         let file_id = self.tx.last_insert_rowid();
         let prov = Provenance::Syntactic.as_str();
 

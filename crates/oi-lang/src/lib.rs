@@ -25,6 +25,21 @@ pub trait Extractor: Send + Sync {
     fn handles(&self, path: &str) -> bool;
 
     fn extract(&self, source: &[u8]) -> Result<FileFacts, ExtractError>;
+
+    /// Diagnostics: where the parser hit syntax errors. Defaults to none.
+    fn syntax_errors(&self, _source: &[u8]) -> Result<Vec<SyntaxError>, ExtractError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A syntax-error site, for diagnosing extractor quality.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyntaxError {
+    pub line: u32,
+    /// Kind of the nearest non-error ancestor, e.g. `field_declaration_list`.
+    pub context: String,
+    /// The start of the erroneous text.
+    pub text: String,
 }
 
 /// The set of extractors in use, consulted in order.

@@ -38,7 +38,7 @@ the tool works. Background and done criteria: `../HANDOFF.md`.
 - [ ] **M3** Firefox benchmark: index time/size, lookup latency, incremental timing; accuracy vs the
       2026-10-30 ground truth (Q1 includers of `nsHttpChannel.h` = 24; Q3 `OnStartRequest` implementers = 45);
       Haiku+index vs Haiku+grep on tokens and accuracy. Scripts + results in `bench/`.
-- [ ] **M4** Fix what the numbers show. Ask the user before any Chromium-scale clone.
+- [ ] **M4** Fix what the numbers show. Known: 43% of Firefox C/C++ files have ≥1 tree-sitter error (mostly local, in bodies/args; ~4% top-level); consider labelling hits from files with top-level errors. Ask the user before any Chromium-scale clone.
 - [ ] **M4b** Extractors for Rust, then JS/TS, then C#; each benchmarked before the next.
 - [ ] **M5** orch integration through orch-skill's workflow (later).
 
@@ -46,3 +46,7 @@ the tool works. Background and done criteria: `../HANDOFF.md`.
 
 - 2026-10-30: plan written.
 - 2026-10-30: M1+M2 done: 7 crates, clippy pedantic clean, unit + end-to-end tests (fixture git repo, incremental update).
+- 2026-10-30: Firefox @0b6146da78 (41,857 C/C++ files): full index 41 s, 1.0 GB RSS, 1.04 GB DB (20.4M refs);
+  no-op update 0.92 s. Q1 includers of nsHttpChannel.h 24/24 exact (all `resolved`, 27 ms); Q3
+  OnStartRequest(nsIRequest*) implementers under netwerk/ 45/45 (49 ms). Fixed: statement macros
+  without `;` (NS_IMPL_ISUPPORTS...) mis-scoped the rest of the file → blanked before parsing.

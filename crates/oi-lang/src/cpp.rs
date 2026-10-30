@@ -4,9 +4,11 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use oi_model::{BaseClass, FileFacts, Include, Lang, RefKind, Reference, Symbol, SymbolKind};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
-use crate::{ExtractError, Extractor, extension};
+use crate::{ExtractError, Extractor, SyntaxError, extension};
+
+mod macros;
 
 const EXTENSIONS: &[&str] = &[
     "c", "h", "cc", "cpp", "cxx", "c++", "hh", "hpp", "hxx", "h++", "inl", "ipp", "tcc", "mm",
@@ -44,21 +46,40 @@ impl Extractor for CppExtractor {
         extension(path).is_some_and(|e| EXTENSIONS.contains(&e.as_str()))
     }
 
-    fn extract(&self, source: &[u8]) -> Result<FileFacts, ExtractError> {
-        let tree = PARSER.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            if slot.is_none() {
-                let mut parser = Parser::new();
-                parser
-                    .set_language(&tree_sitter_cpp::LANGUAGE.into())
-                    .map_err(|_| ExtractError::Grammar("cpp"))?;
-                *slot = Some(parser);
+    fn syntax_errors(&self, source: &[u8]) -> Result<Vec<SyntaxError>, ExtractError> {
+        let (rewritten, _) = macros::neutralize(source);
+        let source = rewritten.as_deref().unwrap_or(source);
+        let tree = parse(source)?;
+        let mut out = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.is_error() || node.is_missing() {
+                let mut ctx = node.parent();
+                while let Some(p) = ctx.filter(|p| p.is_error()) {
+                    ctx = p.parent();
+                }
+                let end = node.end_byte().min(node.start_byte() + 80);
+                out.push(SyntaxError {
+                    line: line_of(node),
+                    context: ctx.map_or("", |p| p.kind()).to_owned(),
+                    text: String::from_utf8_lossy(&source[node.start_byte()..end])
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                });
+                continue;
             }
-            slot.as_mut()
-                .expect("parser initialized above")
-                .parse(source, None)
-                .ok_or(ExtractError::NoTree)
-        })?;
+            let mut cursor = node.walk();
+            stack.extend(node.children(&mut cursor));
+        }
+        out.sort_by_key(|e| e.line);
+        Ok(out)
+    }
+
+    fn extract(&self, source: &[u8]) -> Result<FileFacts, ExtractError> {
+        let (rewritten, blanked) = macros::neutralize(source);
+        let source = rewritten.as_deref().unwrap_or(source);
+        let tree = parse(source)?;
         let mut walker = Walker {
             src: source,
             virtual_macros: &self.virtual_macros,
@@ -69,8 +90,29 @@ impl Extractor for CppExtractor {
             seen_refs: HashSet::new(),
         };
         walker.walk(tree.root_node());
+        for b in blanked {
+            walker.push_ref(&b.name, RefKind::Use, b.line);
+        }
         Ok(walker.facts)
     }
+}
+
+/// Parses with this thread's cached parser.
+fn parse(source: &[u8]) -> Result<Tree, ExtractError> {
+    PARSER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let mut parser = Parser::new();
+            parser
+                .set_language(&tree_sitter_cpp::LANGUAGE.into())
+                .map_err(|_| ExtractError::Grammar("cpp"))?;
+            *slot = Some(parser);
+        }
+        slot.as_mut()
+            .expect("parser initialized above")
+            .parse(source, None)
+            .ok_or(ExtractError::NoTree)
+    })
 }
 
 /// An open scope and the syntax node that opened it.
@@ -141,6 +183,9 @@ impl<'a> Walker<'a> {
     }
 
     fn enter(&mut self, node: Node<'a>) {
+        if node.is_error() || node.is_missing() {
+            self.facts.parse_errors += 1;
+        }
         match node.kind() {
             "preproc_include" => self.include(node),
             "preproc_def" | "preproc_function_def" => {

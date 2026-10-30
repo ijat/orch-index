@@ -214,6 +214,8 @@ pub struct FileFacts {
     pub references: Vec<Reference>,
     pub includes: Vec<Include>,
     pub bases: Vec<BaseClass>,
+    /// Syntax-error nodes in the parse; non-zero means some facts here may be mis-scoped.
+    pub parse_errors: u32,
 }
 
 #[cfg(test)]

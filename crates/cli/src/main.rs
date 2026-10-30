@@ -58,6 +58,14 @@ enum Command {
     },
     /// Row counts and the indexed commit.
     Stats,
+    /// Debug: print the facts extracted from one file on disk, as JSON lines.
+    #[command(hide = true)]
+    Extract {
+        file: PathBuf,
+        /// Print syntax-error sites instead of symbols.
+        #[arg(long)]
+        errors: bool,
+    },
     /// Where a symbol is defined or declared. NAME may be qualified: `Class::Method`.
     Def {
         name: String,
@@ -122,6 +130,25 @@ fn run() -> Result<()> {
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         dir.join("index.db")
     };
+    if let Command::Extract { file, errors } = &cli.command {
+        let path = file.to_string_lossy();
+        let registry = oi_lang::Registry::builtin();
+        let extractor = registry
+            .for_path(&path)
+            .context("no extractor for this file")?;
+        let source = std::fs::read(file)?;
+        let mut stdout = io::stdout().lock();
+        if *errors {
+            for e in extractor.syntax_errors(&source)? {
+                writeln!(stdout, "{}", serde_json::to_string(&e)?)?;
+            }
+        } else {
+            for s in &extractor.extract(&source)?.symbols {
+                writeln!(stdout, "{}", serde_json::to_string(s)?)?;
+            }
+        }
+        return Ok(());
+    }
     let mut store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
 
     match cli.command {
@@ -147,6 +174,7 @@ fn run() -> Result<()> {
                 stats.extract_time.as_secs_f64()
             );
         }
+        Command::Extract { .. } => unreachable!("handled before opening the store"),
         Command::Stats => {
             println!(
                 "commit {}",
@@ -155,16 +183,27 @@ fn run() -> Result<()> {
             for (table, n) in store.counts()? {
                 println!("{table:9} {n}");
             }
+            println!(
+                "errors    {} files parsed with syntax errors",
+                store.files_with_errors()?
+            );
             if let Ok(meta) = std::fs::metadata(&db) {
                 println!("db       {:.1} MB  {}", mb(meta.len()), db.display());
             }
         }
+        query => run_query(&store, &repo, query)?,
+    }
+    Ok(())
+}
+
+fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
+    let engine = Engine::new(store, repo);
+    match command {
         Command::Def { name, kind, out } => {
             let kinds = kind
                 .iter()
                 .map(|k| SymbolKind::parse(k).with_context(|| format!("unknown kind `{k}`")))
                 .collect::<Result<Vec<_>>>()?;
-            let engine = Engine::new(&store, &repo);
             let hits = engine.def(&name, &kinds, out.path.as_deref())?;
             print_hits(&engine, &format!("definitions of {name}"), hits, &out)?;
         }
@@ -172,17 +211,14 @@ fn run() -> Result<()> {
             let kind = kind
                 .map(|k| RefKind::parse(&k).with_context(|| format!("unknown ref kind `{k}`")))
                 .transpose()?;
-            let engine = Engine::new(&store, &repo);
             let hits = engine.refs(&name, kind, out.path.as_deref())?;
             print_hits(&engine, &format!("references to {name}"), hits, &out)?;
         }
         Command::Callers { name, out } => {
-            let engine = Engine::new(&store, &repo);
             let hits = engine.refs(&name, Some(RefKind::Call), out.path.as_deref())?;
             print_hits(&engine, &format!("call sites of {name}"), hits, &out)?;
         }
         Command::Includers { file, out } => {
-            let engine = Engine::new(&store, &repo);
             let hits = engine.includers(&file, out.path.as_deref())?;
             print_hits(&engine, &format!("includers of {file}"), hits, &out)?;
         }
@@ -192,7 +228,6 @@ fn run() -> Result<()> {
             sig,
             out,
         } => {
-            let engine = Engine::new(&store, &repo);
             let hits = engine.overrides(
                 &method,
                 base.as_deref(),
@@ -205,6 +240,9 @@ fn run() -> Result<()> {
                 hits,
                 &out,
             )?;
+        }
+        Command::Index { .. } | Command::Stats | Command::Extract { .. } => {
+            unreachable!("not a query")
         }
     }
     Ok(())

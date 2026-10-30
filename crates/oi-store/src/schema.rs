@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::{Result, StoreError};
 
 /// Bump on any incompatible change; an old index is rebuilt rather than migrated.
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 
 const DDL: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS files (
     path TEXT NOT NULL UNIQUE,
     oid TEXT NOT NULL,
     lang TEXT NOT NULL,
+    errors INTEGER NOT NULL,
     base_id INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS files_base ON files (base_id);
