@@ -1,5 +1,8 @@
 """Usage: language_truth.py OUT_DIR CORPORA_DIR
 
+Writes OUT_DIR/truth/<repo>-<sha10>/<question>.txt and OUT_DIR/questions-<repo>.json in the format
+bench/index_accuracy.py reads (copy them into bench/ to update the committed sets).
+
 Ground truth for the language validation corpora, built with git grep + regex (no tree-sitter),
 then compared with orch-index. Prints truth size, misses and extras per question."""
 import json, os, re, subprocess, sys
@@ -25,14 +28,32 @@ def index(repo, *args):
     return json.loads(r.stdout)["hits"]
 
 
-results = []
+REPOS = {
+    "rust-analyzer": "https://github.com/rust-lang/rust-analyzer.git",
+    "vscode": "https://github.com/microsoft/vscode.git",
+    "node": "https://github.com/nodejs/node.git",
+    "efcore": "https://github.com/dotnet/efcore.git",
+}
+results = {}
+
+
+def head(repo):
+    return subprocess.run(["git", "-C", f"{C}/{repo}", "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
 
 
 def compare(qid, repo, truth, got, cmd, unit):
     truth, got = set(truth), set(got)
-    os.makedirs(f"{OUT}/{repo}", exist_ok=True)
-    open(f"{OUT}/{repo}/{qid}.txt", "w").write("".join(f"{t}\n" for t in sorted(truth)))
-    results.append({"repo": repo, "id": qid, "truth": f"{qid}.txt", "unit": unit, "index_cmd": cmd})
+    truth_dir = f"{repo}-{head(repo)[:10]}"
+    os.makedirs(f"{OUT}/truth/{truth_dir}", exist_ok=True)
+    open(f"{OUT}/truth/{truth_dir}/{qid}.txt", "w").write("".join(f"{t}\n" for t in sorted(truth)))
+    spec = results.setdefault(repo, {
+        "truth_dir": truth_dir,
+        "corpus": {"repo": REPOS[repo], "commit": head(repo),
+                   "clone": "git clone --depth 1 <repo> (then verify HEAD == commit)"},
+        "questions": [],
+    })
+    spec["questions"].append({"id": qid, "truth": f"{qid}.txt", "unit": unit, "index_cmd": cmd})
     print(f"{repo} {qid}: truth {len(truth)} got {len(got)} | missed {sorted(truth - got)[:12]} | extra {sorted(got - truth)[:12]}")
 
 
@@ -81,8 +102,8 @@ for l in grep(V, r"""(from|import)\s*\(?\s*['"][./][^'"]*glob(\.js)?['"]""", "*.
     resolved = re.sub(r"\.js$", "", resolved)
     if resolved + ".ts" == target:
         t.add(path)
-cmd = ["includers", target, "--files"]
-compare("includers-glob", V, t, {h["path"] for h in index(V, "includers", target)}, cmd, "path")
+cmd = ["includers", target]
+compare("includers-glob", V, t, {h["path"] for h in index(V, *cmd)}, cmd, "path")
 
 call_re = r"\bcreateDecorator\s*(<.*>)?\s*\("
 t = set()
@@ -181,4 +202,5 @@ t = {l for l in grep(E, r"^\s*(global\s+)?using\s+Microsoft\.EntityFrameworkCore
 cmd = ["importers", ns]
 compare("importers-sqlexpressions", E, t, {h["path"] for h in index(E, *cmd)}, cmd, "path")
 
-json.dump(results, open(f"{OUT}/questions.json", "w"), indent=1)
+for repo, spec in results.items():
+    json.dump(spec, open(f"{OUT}/questions-{repo}.json", "w"), indent=2)

@@ -58,6 +58,19 @@ pub enum Lang {
 }
 
 impl Lang {
+    pub const ALL: [Self; 5] = [
+        Self::Cpp,
+        Self::Rust,
+        Self::JavaScript,
+        Self::TypeScript,
+        Self::CSharp,
+    ];
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|l| l.as_str() == s)
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

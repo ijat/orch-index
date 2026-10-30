@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use oi_git::{GitError, Repo};
 use oi_model::{Provenance, RefKind, SymbolKind, key_of};
-use oi_store::{Store, StoreError, SymbolHit};
+use oi_store::{Filter, Store, StoreError, SymbolHit};
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -71,9 +71,9 @@ impl<'a> Engine<'a> {
     }
 
     /// Definitions and declarations of `name`, which may be qualified (`Class::Method`).
-    pub fn def(&self, name: &str, kinds: &[SymbolKind], path: Option<&str>) -> Result<Vec<Hit>> {
+    pub fn def(&self, name: &str, kinds: &[SymbolKind], filter: Filter<'_>) -> Result<Vec<Hit>> {
         let (scope_suffix, base) = split_qualified(name);
-        let hits = self.store.symbols(base, kinds, path)?;
+        let hits = self.store.symbols(base, kinds, filter)?;
         Ok(hits
             .into_iter()
             .filter(|s| scope_suffix.is_none_or(|q| scope_matches(&s.scope, q)))
@@ -82,11 +82,11 @@ impl<'a> Engine<'a> {
     }
 
     /// Uses of `name`. References are by name only, so every hit is syntactic.
-    pub fn refs(&self, name: &str, kind: Option<RefKind>, path: Option<&str>) -> Result<Vec<Hit>> {
+    pub fn refs(&self, name: &str, kind: Option<RefKind>, filter: Filter<'_>) -> Result<Vec<Hit>> {
         let (_, base) = split_qualified(name);
         Ok(self
             .store
-            .refs(base, kind, path)?
+            .refs(base, kind, filter)?
             .into_iter()
             .map(|r| Hit {
                 path: r.path,
@@ -110,7 +110,7 @@ impl<'a> Engine<'a> {
     /// `syntactic` + `ambiguous:N`: the spec matches `target` and N-1 other files.
     /// `syntactic` + `basename`: the spec matches no indexed path (typically a build-system export
     /// path such as `mozilla/net/X.h`); only the file name agrees.
-    pub fn includers(&self, target: &str, path: Option<&str>) -> Result<Vec<Hit>> {
+    pub fn includers(&self, target: &str, filter: Filter<'_>) -> Result<Vec<Hit>> {
         let basename = target.rsplit('/').next().unwrap_or(target);
         let same_name = self.store.files_by_basename(basename)?;
         let mut keys = vec![key_of(target, false).to_owned()];
@@ -122,10 +122,7 @@ impl<'a> Engine<'a> {
         }
         let mut out = Vec::new();
         for key in &keys {
-            for inc in self.store.includes_by_key(key, false)? {
-                if path.is_some_and(|p| !inc.path.starts_with(p)) {
-                    continue;
-                }
+            for inc in self.store.includes_by_key(key, false, filter)? {
                 let Some((provenance, note)) =
                     classify_include(&inc.path, &inc.spec, target, &same_name)
                 else {
@@ -149,16 +146,13 @@ impl<'a> Engine<'a> {
 
     /// Files importing module or namespace `module` (`crate::store::Store`, `System.Linq`,
     /// `react`), matched by trailing path segments. Syntactic: re-exports are not followed.
-    pub fn importers(&self, module: &str, path: Option<&str>) -> Result<Vec<Hit>> {
+    pub fn importers(&self, module: &str, filter: Filter<'_>) -> Result<Vec<Hit>> {
         let wanted = segments(module);
         let Some(key) = wanted.last() else {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
-        for inc in self.store.includes_by_key(key, true)? {
-            if path.is_some_and(|p| !inc.path.starts_with(p)) {
-                continue;
-            }
+        for inc in self.store.includes_by_key(key, true, filter)? {
             if !segments(&inc.spec).ends_with(&wanted) {
                 continue;
             }
@@ -186,7 +180,7 @@ impl<'a> Engine<'a> {
         method: &str,
         base: Option<&str>,
         signature: Option<&str>,
-        path: Option<&str>,
+        filter: Filter<'_>,
     ) -> Result<Vec<Hit>> {
         let bases = base.map(|b| self.resolve_class(b)).transpose()?;
         let derived = bases
@@ -195,7 +189,7 @@ impl<'a> Engine<'a> {
             .transpose()?;
         let wanted_sig = signature.map(normalize_signature);
         let mut by_class: BTreeMap<String, Vec<SymbolHit>> = BTreeMap::new();
-        for s in self.store.symbols(method, &[SymbolKind::Method], path)? {
+        for s in self.store.symbols(method, &[SymbolKind::Method], filter)? {
             if s.scope.is_empty()
                 || wanted_sig
                     .as_ref()
@@ -243,7 +237,7 @@ impl<'a> Engine<'a> {
         let kinds = [SymbolKind::Class, SymbolKind::Struct, SymbolKind::Union];
         let mut found: Vec<String> = self
             .store
-            .symbols(base, &kinds, None)?
+            .symbols(base, &kinds, Filter::default())?
             .into_iter()
             .filter(|s| scope.is_none_or(|q| scope_matches(&s.scope, q)))
             .map(|s| qualify(&s.scope, base))
@@ -387,7 +381,11 @@ fn classify_include(
     same_name: &[String],
 ) -> Option<(Provenance, Option<String>)> {
     let relative = relative_target(includer, spec);
-    if relative.as_deref().is_some_and(|r| names_file(r, target)) {
+    let ts_importer = is_typescript(includer);
+    if relative
+        .as_deref()
+        .is_some_and(|r| names_file(r, target, ts_importer))
+    {
         return Some((Provenance::Resolved, None));
     }
     // An explicitly relative spec that doesn't resolve to the target names another file.
@@ -420,12 +418,23 @@ fn classify_include(
     None
 }
 
-/// Whether the resolved path `resolved` (possibly extension-less) names `target`.
-fn names_file(resolved: &str, target: &str) -> bool {
+fn is_typescript(path: &str) -> bool {
+    [".ts", ".tsx", ".mts", ".cts"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
+}
+
+/// Whether the resolved path `resolved` (possibly extension-less) names `target`. With
+/// `ts_importer`, an emitted-file spec also names its TypeScript source.
+fn names_file(resolved: &str, target: &str, ts_importer: bool) -> bool {
     if resolved == target {
         return true;
     }
-    // TypeScript ESM imports name the emitted file: `./glob.js` means `glob.ts`.
+    // TypeScript ESM imports name the emitted file: in a .ts file, `./glob.js` means `glob.ts`.
+    // A .js file importing `./glob.js` means the .js file itself.
+    if !ts_importer {
+        return names_extensionless(resolved, target);
+    }
     for (js, ts) in [
         (".js", &[".ts", ".tsx", ".d.ts"][..]),
         (".mjs", &[".mts"]),
@@ -438,6 +447,11 @@ fn names_file(resolved: &str, target: &str) -> bool {
             return true;
         }
     }
+    names_extensionless(resolved, target)
+}
+
+/// `resolved` names `target` once a script extension (or `/index.<ext>`) is added.
+fn names_extensionless(resolved: &str, target: &str) -> bool {
     let Some(rest) = target.strip_prefix(resolved) else {
         return false;
     };
@@ -519,14 +533,20 @@ mod tests {
 
     #[test]
     fn script_imports_resolve_without_extension() {
-        assert!(names_file("src/a/b", "src/a/b.ts"));
-        assert!(names_file("src/a/b", "src/a/b/index.tsx"));
-        assert!(names_file("src/a/b", "src/a/b.d.ts"));
-        assert!(!names_file("src/a/b", "src/a/bc.ts"));
-        assert!(!names_file("src/a/b", "src/a/b.rs"));
-        assert!(names_file("src/a/glob.js", "src/a/glob.ts"));
-        assert!(names_file("src/a/view.jsx", "src/a/view.tsx"));
-        assert!(!names_file("src/a/glob.js", "src/a/globs.ts"));
+        assert!(names_file("src/a/b", "src/a/b.ts", true));
+        assert!(names_file("src/a/b", "src/a/b/index.tsx", false));
+        assert!(names_file("src/a/b", "src/a/b.d.ts", true));
+        assert!(!names_file("src/a/b", "src/a/bc.ts", true));
+        assert!(!names_file("src/a/b", "src/a/b.rs", true));
+        assert!(names_file("src/a/glob.js", "src/a/glob.ts", true));
+        assert!(names_file("src/a/view.jsx", "src/a/view.tsx", true));
+        assert!(!names_file("src/a/glob.js", "src/a/globs.ts", true));
+        // A JavaScript file importing `./foo.js` means foo.js, not a sibling foo.ts.
+        assert!(!names_file("src/a/foo.js", "src/a/foo.ts", false));
+        assert_eq!(
+            classify_include("src/a/b.js", "./foo.js", "src/a/foo.ts", &[]),
+            None
+        );
         let same = vec!["src/x/foo.ts".to_owned()];
         assert_eq!(
             classify_include("src/x/main.ts", "./foo", "src/x/foo.ts", &same),

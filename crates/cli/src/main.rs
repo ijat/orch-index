@@ -12,9 +12,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use oi_git::Repo;
 use oi_indexer::Indexer;
-use oi_model::{RefKind, SymbolKind};
+use oi_model::{Lang, RefKind, SymbolKind};
 use oi_query::{Engine, Freshness, Hit};
-use oi_store::Store;
+use oi_store::{Filter, Store};
 
 #[derive(Parser)]
 #[command(
@@ -51,8 +51,8 @@ struct Output {
     #[arg(long)]
     files: bool,
     /// Only hits in files of this language: cpp, rust, javascript, typescript, csharp.
-    #[arg(long)]
-    lang: Option<String>,
+    #[arg(long, value_parser = parse_lang)]
+    lang: Option<Lang>,
 }
 
 #[derive(Subcommand)]
@@ -210,13 +210,6 @@ fn run() -> Result<()> {
 }
 
 fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
-    if let Some(lang) = query_output(&command).and_then(|o| o.lang.as_deref()) {
-        anyhow::ensure!(
-            LANGS.contains(&lang),
-            "unknown --lang `{lang}` (expected one of: {})",
-            LANGS.join(", ")
-        );
-    }
     let engine = Engine::new(store, repo);
     match command {
         Command::Def { name, kind, out } => {
@@ -224,26 +217,26 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
                 .iter()
                 .map(|k| SymbolKind::parse(k).with_context(|| format!("unknown kind `{k}`")))
                 .collect::<Result<Vec<_>>>()?;
-            let hits = engine.def(&name, &kinds, out.path.as_deref())?;
+            let hits = engine.def(&name, &kinds, out.filter())?;
             print_hits(&engine, &format!("definitions of {name}"), hits, &out, true)?;
         }
         Command::Refs { name, kind, out } => {
             let kind = kind
                 .map(|k| RefKind::parse(&k).with_context(|| format!("unknown ref kind `{k}`")))
                 .transpose()?;
-            let hits = engine.refs(&name, kind, out.path.as_deref())?;
+            let hits = engine.refs(&name, kind, out.filter())?;
             print_hits(&engine, &format!("references to {name}"), hits, &out, true)?;
         }
         Command::Callers { name, out } => {
-            let hits = engine.refs(&name, Some(RefKind::Call), out.path.as_deref())?;
+            let hits = engine.refs(&name, Some(RefKind::Call), out.filter())?;
             print_hits(&engine, &format!("call sites of {name}"), hits, &out, true)?;
         }
         Command::Includers { file, out } => {
-            let hits = engine.includers(&file, out.path.as_deref())?;
+            let hits = engine.includers(&file, out.filter())?;
             print_hits(&engine, &format!("includers of {file}"), hits, &out, false)?;
         }
         Command::Importers { module, out } => {
-            let hits = engine.importers(&module, out.path.as_deref())?;
+            let hits = engine.importers(&module, out.filter())?;
             print_hits(
                 &engine,
                 &format!("importers of {module}"),
@@ -258,12 +251,7 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
             sig,
             out,
         } => {
-            let hits = engine.overrides(
-                &method,
-                base.as_deref(),
-                sig.as_deref(),
-                out.path.as_deref(),
-            )?;
+            let hits = engine.overrides(&method, base.as_deref(), sig.as_deref(), out.filter())?;
             print_hits(
                 &engine,
                 &format!("classes with method {method}"),
@@ -279,18 +267,20 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
     Ok(())
 }
 
-const LANGS: &[&str] = &["cpp", "rust", "javascript", "typescript", "csharp"];
-
-fn query_output(command: &Command) -> Option<&Output> {
-    match command {
-        Command::Def { out, .. }
-        | Command::Refs { out, .. }
-        | Command::Callers { out, .. }
-        | Command::Includers { out, .. }
-        | Command::Importers { out, .. }
-        | Command::Overrides { out, .. } => Some(out),
-        Command::Index { .. } | Command::Stats | Command::Extract { .. } => None,
+impl Output {
+    fn filter(&self) -> Filter<'_> {
+        Filter {
+            path: self.path.as_deref(),
+            lang: self.lang,
+        }
     }
+}
+
+fn parse_lang(s: &str) -> Result<Lang, String> {
+    Lang::parse(s).ok_or_else(|| {
+        let names: Vec<&str> = Lang::ALL.iter().map(|l| l.as_str()).collect();
+        format!("expected one of: {}", names.join(", "))
+    })
 }
 
 fn print_hits(
@@ -300,14 +290,6 @@ fn print_hits(
     out: &Output,
     snippets: bool,
 ) -> Result<()> {
-    if let Some(lang) = &out.lang {
-        let registry = oi_lang::Registry::builtin();
-        hits.retain(|h| {
-            registry
-                .for_path(&h.path)
-                .is_some_and(|e| e.lang().as_str() == lang)
-        });
-    }
     if out.files {
         return print_files(engine, what, &hits, out);
     }
@@ -458,20 +440,4 @@ fn short(sha: &str) -> &str {
 #[allow(clippy::cast_precision_loss)]
 fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1_048_576.0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::LANGS;
-
-    #[test]
-    fn lang_names_match_the_registry() {
-        let registry = oi_lang::Registry::builtin();
-        let sample = ["a.cc", "a.rs", "a.js", "a.ts", "a.cs"];
-        let langs: Vec<&str> = sample
-            .iter()
-            .map(|p| registry.for_path(p).expect("extractor").lang().as_str())
-            .collect();
-        assert_eq!(langs, LANGS);
-    }
 }

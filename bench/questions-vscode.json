@@ -23,8 +23,7 @@
       "unit": "path",
       "index_cmd": [
         "includers",
-        "src/vs/base/common/glob.ts",
-        "--files"
+        "src/vs/base/common/glob.ts"
       ]
     },
     {

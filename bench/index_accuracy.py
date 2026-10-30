@@ -39,8 +39,13 @@ def main():
             times.append((time.time() - start) * 1000)
         ms = min(times)
         truth = {l.strip() for l in (truth_dir / q["truth"]).read_text().splitlines() if l.strip()}
-        # `--files` output lists files instead of hits.
-        got = {f["path"] for f in out["files"]} if "files" in out else items(q, out["hits"])
+        # `--files` output lists files instead of hits; only path questions can use it.
+        if "files" in out:
+            if q["unit"] != "path":
+                raise SystemExit(f"{q['id']}: --files output needs unit 'path', not {q['unit']!r}")
+            got = {f["path"] for f in out["files"]}
+        else:
+            got = items(q, out["hits"])
         print(f"| {q['id']} | `{' '.join(q['index_cmd'])}` | {len(truth)} | {len(got)} | "
               f"{', '.join(sorted(truth - got)) or '-'} | {', '.join(sorted(got - truth)) or '-'} | {ms:.0f} |")
 

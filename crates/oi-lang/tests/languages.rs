@@ -136,6 +136,37 @@ fn helper(r: &Request) {}
 }
 
 #[test]
+fn rust_token_tree_calls() {
+    let src = r"#[cfg(any(unix, windows))]
+#![cfg_attr(test, derive(Debug))]
+macro_rules! m {
+    ($($x:expr),*) => {
+        fn defined(x: u8) {}
+        struct W(u8);
+        $( repeated($x); )*
+        $f(1);
+    };
+}
+fn main() {
+    foo!(x.g::<<T as Tr>::A>(1));
+}
+";
+    let f = RustExtractor.extract(src.as_bytes()).unwrap();
+    let calls: Vec<_> = f
+        .references
+        .iter()
+        .filter(|r| r.kind == RefKind::Call)
+        .map(|r| (r.name.as_str(), r.line))
+        .collect();
+    assert_eq!(
+        calls,
+        [("repeated", 7), ("foo", 12), ("g", 12)],
+        "{:#?}",
+        f.references
+    );
+}
+
+#[test]
 fn typescript() {
     let src = r#"import { Component } from "react";
 import { util } from "./util";

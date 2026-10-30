@@ -23,6 +23,19 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// Restricts lookups to files under a path prefix and/or of one language.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Filter<'a> {
+    pub path: Option<&'a str>,
+    pub lang: Option<Lang>,
+}
+
+impl Filter<'_> {
+    fn lang_str(&self) -> Option<&'static str> {
+        self.lang.map(Lang::as_str)
+    }
+}
+
 /// An indexed file as recorded in the store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRow {
@@ -148,7 +161,7 @@ impl Store {
         &self,
         name: &str,
         kinds: &[SymbolKind],
-        path_prefix: Option<&str>,
+        filter: Filter<'_>,
     ) -> Result<Vec<SymbolHit>> {
         let Some(name_id) = self.name_id(name)? else {
             return Ok(Vec::new());
@@ -158,9 +171,10 @@ impl Store {
                     f.structural > 0
              FROM symbols s JOIN files f ON f.id = s.file_id
              WHERE s.name_id = ?1 AND (?2 IS NULL OR substr(f.path, 1, length(?2)) = ?2)
+               AND (?3 IS NULL OR f.lang = ?3)
              ORDER BY f.path, s.line",
         )?;
-        let rows = stmt.query_map(params![name_id, path_prefix], |r| {
+        let rows = stmt.query_map(params![name_id, filter.path, filter.lang_str()], |r| {
             Ok(SymbolHit {
                 path: r.get(0)?,
                 oid: r.get(1)?,
@@ -191,7 +205,7 @@ impl Store {
         &self,
         name: &str,
         kind: Option<RefKind>,
-        path_prefix: Option<&str>,
+        filter: Filter<'_>,
     ) -> Result<Vec<RefHit>> {
         let Some(name_id) = self.name_id(name)? else {
             return Ok(Vec::new());
@@ -202,42 +216,57 @@ impl Store {
              LEFT JOIN names c ON c.id = r.container_id
              WHERE r.name_id = ?1 AND (?2 IS NULL OR r.kind = ?2)
                AND (?3 IS NULL OR substr(f.path, 1, length(?3)) = ?3)
+               AND (?4 IS NULL OR f.lang = ?4)
              ORDER BY f.path, r.line",
         )?;
         let kind_code = kind.map(ref_kind_code);
-        let rows = stmt.query_map(params![name_id, kind_code, path_prefix], |r| {
-            Ok(RefHit {
-                path: r.get(0)?,
-                oid: r.get(1)?,
-                line: r.get(2)?,
-                kind: ref_kind_from_code(r.get(3)?),
-                container: r.get(4)?,
-                file_damaged: r.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![name_id, kind_code, filter.path, filter.lang_str()],
+            |r| {
+                Ok(RefHit {
+                    path: r.get(0)?,
+                    oid: r.get(1)?,
+                    line: r.get(2)?,
+                    kind: ref_kind_from_code(r.get(3)?),
+                    container: r.get(4)?,
+                    file_damaged: r.get(5)?,
+                })
+            },
+        )?;
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
     /// Include/import directives with lookup key `key` (see [`oi_model::Include::key`]), either
     /// module imports or file includes.
-    pub fn includes_by_key(&self, key: &str, module: bool) -> Result<Vec<IncludeHit>> {
+    pub fn includes_by_key(
+        &self,
+        key: &str,
+        module: bool,
+        filter: Filter<'_>,
+    ) -> Result<Vec<IncludeHit>> {
         let Some(base_id) = self.name_id(key)? else {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(
             "SELECT f.path, f.oid, i.line, i.spec, f.structural > 0
              FROM includes i JOIN files f ON f.id = i.file_id
-             WHERE i.base_id = ?1 AND i.is_module = ?2 ORDER BY f.path, i.line",
+             WHERE i.base_id = ?1 AND i.is_module = ?2
+               AND (?3 IS NULL OR substr(f.path, 1, length(?3)) = ?3)
+               AND (?4 IS NULL OR f.lang = ?4)
+             ORDER BY f.path, i.line",
         )?;
-        let rows = stmt.query_map(params![base_id, module], |r| {
-            Ok(IncludeHit {
-                path: r.get(0)?,
-                oid: r.get(1)?,
-                line: r.get(2)?,
-                spec: r.get(3)?,
-                file_damaged: r.get(4)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![base_id, module, filter.path, filter.lang_str()],
+            |r| {
+                Ok(IncludeHit {
+                    path: r.get(0)?,
+                    oid: r.get(1)?,
+                    line: r.get(2)?,
+                    spec: r.get(3)?,
+                    file_damaged: r.get(4)?,
+                })
+            },
+        )?;
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 

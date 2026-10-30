@@ -5,7 +5,7 @@ use oi_git::Repo;
 use oi_indexer::Indexer;
 use oi_model::{Provenance, SymbolKind};
 use oi_query::Engine;
-use oi_store::Store;
+use oi_store::{Filter, Store};
 
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -77,12 +77,16 @@ fn index_query_and_update() {
     );
 
     let engine = Engine::new(&store, &repo);
-    let defs = engine.def("Channel", &[SymbolKind::Class], None).unwrap();
+    let defs = engine
+        .def("Channel", &[SymbolKind::Class], Filter::default())
+        .unwrap();
     assert_eq!(defs.len(), 1);
     assert_eq!((defs[0].path.as_str(), defs[0].line), ("net/Channel.h", 2));
 
     // Two files are named Channel.h; the includes are classified accordingly.
-    let inc = engine.includers("net/Channel.h", None).unwrap();
+    let inc = engine
+        .includers("net/Channel.h", Filter::default())
+        .unwrap();
     let got: Vec<_> = inc
         .iter()
         .map(|h| (h.path.as_str(), h.provenance, h.note.as_deref()))
@@ -100,7 +104,7 @@ fn index_query_and_update() {
             "OnStartRequest",
             Some("nsIStreamListener"),
             Some("(nsIRequest *)"),
-            None,
+            Filter::default(),
         )
         .unwrap();
     let classes: Vec<_> = over.iter().map(|h| h.detail.as_str()).collect();
@@ -108,7 +112,7 @@ fn index_query_and_update() {
     assert_eq!(over[0].note.as_deref(), Some("declared+defined"));
 
     let mut calls = engine
-        .refs("Helper", Some(oi_model::RefKind::Call), None)
+        .refs("Helper", Some(oi_model::RefKind::Call), Filter::default())
         .unwrap();
     engine.attach_snippets(&mut calls).unwrap();
     assert_eq!(calls.len(), 1);
@@ -131,14 +135,34 @@ fn index_query_and_update() {
     assert_eq!((stats.extracted, stats.unchanged, stats.removed), (1, 3, 2));
 
     let engine = Engine::new(&store, &repo);
-    assert!(engine.refs("Helper", None, None).unwrap().is_empty());
+    assert!(
+        engine
+            .refs("Helper", None, Filter::default())
+            .unwrap()
+            .is_empty()
+    );
     let def = engine
-        .def("Channel::OnStartRequest", &[], Some("net/Channel.cpp"))
+        .def(
+            "Channel::OnStartRequest",
+            &[],
+            Filter {
+                path: Some("net/Channel.cpp"),
+                lang: None,
+            },
+        )
         .unwrap();
     assert_eq!(def[0].line, 3);
     assert!(!engine.freshness().unwrap().is_stale());
     // With the other Channel.h gone, the include from dom/ is still only a basename match.
-    let inc = engine.includers("net/Channel.h", Some("dom/")).unwrap();
+    let inc = engine
+        .includers(
+            "net/Channel.h",
+            Filter {
+                path: Some("dom/"),
+                lang: None,
+            },
+        )
+        .unwrap();
     assert_eq!(inc[0].note.as_deref(), Some("basename"));
 }
 
@@ -184,37 +208,62 @@ fn languages_imports_and_damage_labels() {
     assert_eq!((stats.indexable, stats.extracted), (9, 9));
     let engine = Engine::new(&store, &repo);
 
-    let inc = engine.includers("web/src/util.ts", None).unwrap();
+    let inc = engine
+        .includers("web/src/util.ts", Filter::default())
+        .unwrap();
     let got: Vec<_> = inc
         .iter()
         .map(|h| (h.path.as_str(), h.provenance))
         .collect();
     assert_eq!(got, [("web/src/app.tsx", Provenance::Resolved)]);
-    let inc = engine.includers("web/src/widgets/index.ts", None).unwrap();
+    let inc = engine
+        .includers("web/src/widgets/index.ts", Filter::default())
+        .unwrap();
     assert_eq!(inc.len(), 1, "{inc:#?}");
 
-    let imp = engine.importers("react", None).unwrap();
+    let imp = engine.importers("react", Filter::default()).unwrap();
     assert_eq!(imp[0].path, "web/src/app.tsx");
     assert_eq!(
-        engine.importers("store::Store", None).unwrap()[0].path,
+        engine.importers("store::Store", Filter::default()).unwrap()[0].path,
         "core/src/lib.rs"
     );
     assert_eq!(
-        engine.importers("System.Linq", None).unwrap()[0].path,
+        engine.importers("System.Linq", Filter::default()).unwrap()[0].path,
         "svc/Svc.cs"
     );
-    assert!(engine.importers("Store::store", None).unwrap().is_empty());
+    assert!(
+        engine
+            .importers("Store::store", Filter::default())
+            .unwrap()
+            .is_empty()
+    );
 
-    let over = engine.overrides("put", Some("Sink"), None, None).unwrap();
+    let over = engine
+        .overrides("put", Some("Sink"), None, Filter::default())
+        .unwrap();
     assert_eq!(over.len(), 1);
     assert_eq!(over[0].detail, "Store (&self)");
     assert_eq!(
-        engine.def("Job", &[SymbolKind::Class], None).unwrap()[0].detail,
+        engine
+            .def("Job", &[SymbolKind::Class], Filter::default())
+            .unwrap()[0]
+            .detail,
         "class Svc"
     );
 
-    let later = engine.def("Later", &[], None).unwrap();
+    let later = engine.def("Later", &[], Filter::default()).unwrap();
     assert_eq!(later[0].note.as_deref(), Some("parse-errors"), "{later:#?}");
-    let clean = engine.def("Later2", &[], None).unwrap();
+    let clean = engine.def("Later2", &[], Filter::default()).unwrap();
+    // The language filter: `Store` is referenced only from Rust.
+    let rust_only = Filter {
+        path: None,
+        lang: Some(oi_model::Lang::Rust),
+    };
+    assert_eq!(engine.refs("Store", None, rust_only).unwrap().len(), 2);
+    let cs_only = Filter {
+        path: None,
+        lang: Some(oi_model::Lang::CSharp),
+    };
+    assert!(engine.refs("Store", None, cs_only).unwrap().is_empty());
     assert_eq!(clean[0].note, None);
 }

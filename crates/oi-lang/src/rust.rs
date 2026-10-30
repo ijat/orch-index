@@ -91,8 +91,10 @@ impl<'a> Visit<'a> for Walker<'a> {
             "identifier" | "field_identifier" => {
                 // Macro arguments are unparsed token trees; recover `f(…)`, `x.f::<T>(…)` and
                 // `m!(…)` there from the token sequence.
-                let called =
-                    node.parent().is_some_and(|p| p.kind() == "token_tree") && token_call(node);
+                let called = node
+                    .parent()
+                    .is_some_and(|p| matches!(p.kind(), "token_tree" | "token_repetition"))
+                    && token_call(node);
                 self.st
                     .reference(node, if called { RefKind::Call } else { RefKind::Use });
             }
@@ -281,6 +283,24 @@ fn path_text(st: &State<'_>, node: Node<'_>) -> String {
 
 /// Inside a token tree: is `ident` followed by `(…)`, `::<…>(…)` or `!`?
 fn token_call(ident: Node<'_>) -> bool {
+    // `fn f(..)` / `struct W(..)` in a macro body define, `$f(..)` is a metavariable.
+    if ident
+        .prev_sibling()
+        .is_some_and(|p| matches!(p.kind(), "fn" | "struct" | "enum" | "union" | "trait" | "$"))
+    {
+        return false;
+    }
+    // Attribute arguments (`#[cfg(any(unix))]`) are not calls.
+    let mut up = ident.parent();
+    while let Some(p) = up {
+        if matches!(
+            p.kind(),
+            "attribute_item" | "inner_attribute_item" | "attribute"
+        ) {
+            return false;
+        }
+        up = p.parent();
+    }
     let Some(mut next) = ident.next_sibling() else {
         return false;
     };
@@ -289,13 +309,17 @@ fn token_call(ident: Node<'_>) -> bool {
     }
     // Skip a turbofish `::<…>`, tracking angle-bracket depth across tokens.
     if next.kind() == "::"
-        && let Some(lt) = next.next_sibling().filter(|n| n.kind() == "<")
+        && let Some(lt) = next
+            .next_sibling()
+            .filter(|n| matches!(n.kind(), "<" | "<<"))
     {
         let mut depth = 0usize;
         let mut cur = Some(lt);
         while let Some(n) = cur {
             match n.kind() {
                 "<" => depth += 1,
+                // `::<<T as Tr>::A>` lexes the first two brackets as one token.
+                "<<" => depth += 2,
                 ">" => depth = depth.saturating_sub(1),
                 ">>" => depth = depth.saturating_sub(2),
                 _ => {}
