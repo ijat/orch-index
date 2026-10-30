@@ -3,7 +3,7 @@
 //! Output is designed for agents: a count line first, then one `path:line` row per hit with its
 //! provenance, capped by `--limit`, with a per-directory breakdown of whatever was cut.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -47,6 +47,9 @@ struct Output {
     /// Omit the source line after each hit.
     #[arg(long)]
     no_snippet: bool,
+    /// One row per file, `path (hits) [label]`: for "which files ..." questions.
+    #[arg(long)]
+    files: bool,
 }
 
 #[derive(Subcommand)]
@@ -205,22 +208,22 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
                 .map(|k| SymbolKind::parse(k).with_context(|| format!("unknown kind `{k}`")))
                 .collect::<Result<Vec<_>>>()?;
             let hits = engine.def(&name, &kinds, out.path.as_deref())?;
-            print_hits(&engine, &format!("definitions of {name}"), hits, &out)?;
+            print_hits(&engine, &format!("definitions of {name}"), hits, &out, true)?;
         }
         Command::Refs { name, kind, out } => {
             let kind = kind
                 .map(|k| RefKind::parse(&k).with_context(|| format!("unknown ref kind `{k}`")))
                 .transpose()?;
             let hits = engine.refs(&name, kind, out.path.as_deref())?;
-            print_hits(&engine, &format!("references to {name}"), hits, &out)?;
+            print_hits(&engine, &format!("references to {name}"), hits, &out, true)?;
         }
         Command::Callers { name, out } => {
             let hits = engine.refs(&name, Some(RefKind::Call), out.path.as_deref())?;
-            print_hits(&engine, &format!("call sites of {name}"), hits, &out)?;
+            print_hits(&engine, &format!("call sites of {name}"), hits, &out, true)?;
         }
         Command::Includers { file, out } => {
             let hits = engine.includers(&file, out.path.as_deref())?;
-            print_hits(&engine, &format!("includers of {file}"), hits, &out)?;
+            print_hits(&engine, &format!("includers of {file}"), hits, &out, false)?;
         }
         Command::Overrides {
             method,
@@ -239,6 +242,7 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
                 &format!("classes with method {method}"),
                 hits,
                 &out,
+                true,
             )?;
         }
         Command::Index { .. } | Command::Stats | Command::Extract { .. } => {
@@ -248,7 +252,16 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
     Ok(())
 }
 
-fn print_hits(engine: &Engine<'_>, what: &str, mut hits: Vec<Hit>, out: &Output) -> Result<()> {
+fn print_hits(
+    engine: &Engine<'_>,
+    what: &str,
+    mut hits: Vec<Hit>,
+    out: &Output,
+    snippets: bool,
+) -> Result<()> {
+    if out.files {
+        return print_files(engine, what, &hits, out);
+    }
     let total = hits.len();
     let shown = if out.limit == 0 {
         total
@@ -256,7 +269,7 @@ fn print_hits(engine: &Engine<'_>, what: &str, mut hits: Vec<Hit>, out: &Output)
         total.min(out.limit)
     };
     let rest: Vec<Hit> = hits.split_off(shown);
-    if !out.no_snippet {
+    if snippets && !out.no_snippet {
         engine.attach_snippets(&mut hits)?;
     }
     let fresh = engine.freshness()?;
@@ -297,6 +310,62 @@ fn print_hits(engine: &Engine<'_>, what: &str, mut hits: Vec<Hit>, out: &Output)
             "… {} more (narrow with --path or raise --limit): {}",
             rest.len(),
             dirs.join(", ")
+        )?;
+    }
+    Ok(())
+}
+
+/// Hits grouped per file (hits arrive sorted by path), with the file's label when all agree.
+fn print_files(engine: &Engine<'_>, what: &str, hits: &[Hit], out: &Output) -> Result<()> {
+    let mut files: Vec<(&str, usize, BTreeSet<String>)> = Vec::new();
+    for h in hits {
+        let label = match &h.note {
+            Some(n) => format!("{}:{n}", h.provenance),
+            None => h.provenance.to_string(),
+        };
+        match files.last_mut() {
+            Some((path, n, labels)) if *path == h.path => {
+                *n += 1;
+                labels.insert(label);
+            }
+            _ => files.push((&h.path, 1, BTreeSet::from([label]))),
+        }
+    }
+    let total_files = files.len();
+    let shown = if out.limit == 0 {
+        total_files
+    } else {
+        total_files.min(out.limit)
+    };
+    let fresh = engine.freshness()?;
+    let mut stdout = io::stdout().lock();
+    if out.json {
+        let rows: Vec<_> = files[..shown]
+            .iter()
+            .map(|(p, n, l)| serde_json::json!({"path": p, "hits": n, "labels": l}))
+            .collect();
+        let doc = serde_json::json!({
+            "query": what, "total_hits": hits.len(), "total_files": total_files, "shown": shown,
+            "index": fresh, "stale": fresh.is_stale(), "files": rows,
+        });
+        writeln!(stdout, "{}", serde_json::to_string(&doc)?)?;
+        return Ok(());
+    }
+    writeln!(
+        stdout,
+        "{} {what} in {total_files} files{}",
+        hits.len(),
+        freshness_note(&fresh)
+    )?;
+    for (path, n, labels) in &files[..shown] {
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        writeln!(stdout, "{path} ({n}) [{}]", labels.join(","))?;
+    }
+    if shown < total_files {
+        writeln!(
+            stdout,
+            "… {} more files (narrow with --path or raise --limit)",
+            total_files - shown
         )?;
     }
     Ok(())

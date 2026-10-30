@@ -12,11 +12,14 @@ references, includes or overrides, your FIRST command must be an `orch-index` qu
 All take `--path PREFIX` (scope) and `--limit N` (default 30; `--limit 0` = all). Output: a count line,
 then `path:line [label] detail | source line`.
 
+If the question asks *which files*, add `--files --limit 0`: one `path (hits) [label]` row per file.
+
 Trust labels:
 - `[resolved]` — exact. Use as is.
 - `[syntactic]` — parsed from the source; complete for C/C++ files at the indexed commit. Names are
   matched textually, so for a generic name check the `detail` / source line to pick the right one.
 - `:ambiguous:N` or `:basename` — the include target is uncertain. Verify only those rows (read the line).
 
-Do not re-verify `[resolved]` or `[syntactic]` rows with grep. Fall back to grep only for non-C/C++
+Rule: answer from the index output. Do NOT run grep/rg to double-check `[resolved]` or `[syntactic]`
+rows; that only repeats work the index already did. Fall back to grep only for non-C/C++
 files, or if the count line says the index is stale.
