@@ -43,12 +43,4 @@ echo "changed files: $(git -C "$corpus" diff --name-only HEAD "$synthetic" | wc 
 echo "incremental ($n files) -> synthetic:"; oi index --rev "$synthetic" | sed 's/^/  /'
 echo "incremental back -> HEAD:";           oi index --rev HEAD | sed 's/^/  /'
 
-echo "lookups (wall s, 5 runs each, includes process start):"
-for q in "def nsHttpChannel --kind class" "callers NS_GetFinalChannelURI --limit 0" \
-         "includers netwerk/protocol/http/nsHttpChannel.h --limit 0" \
-         "overrides OnStartRequest --sig (nsIRequest*) --path netwerk/ --limit 0" \
-         "refs nsresult --limit 30" "callers Init --limit 30"; do
-  read -r -a args <<<"$q"
-  times=$(for _ in 1 2 3 4 5; do t oi "${args[@]}"; done | sort -n | tr '\n' ' ')
-  echo "  $q: $times"
-done
+echo "lookups: see bench/index_accuracy.py (times each question's real query)"

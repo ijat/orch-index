@@ -35,10 +35,10 @@ the tool works. Background and done criteria: `../HANDOFF.md`.
 
 - [x] **M1** Skeleton + C/C++ `def` / `refs` on a fixture repo; full and incremental indexing; tests.
 - [x] **M2** `includers`, `callers`, `overrides` (bases + per-class methods, signature-aware). `impact <rev>` deferred until after M3.
-- [ ] **M3** Firefox benchmark: index time/size, lookup latency, incremental timing; accuracy vs the
+- [x] **M3** Firefox benchmark: index time/size, lookup latency, incremental timing; accuracy vs the
       2026-10-30 ground truth (Q1 includers of `nsHttpChannel.h` = 24; Q3 `OnStartRequest` implementers = 45);
       Haiku+index vs Haiku+grep on tokens and accuracy. Scripts + results in `bench/`.
-- [ ] **M4** Fix what the numbers show. Known: 43% of Firefox C/C++ files have ≥1 tree-sitter error (mostly local, in bodies/args; ~4% top-level); consider labelling hits from files with top-level errors. Ask the user before any Chromium-scale clone.
+- [~] **M4** Fix what the numbers show (Chromium-scale run done 2026-10-30, src only). Known: 43% of Firefox C/C++ files have ≥1 tree-sitter error (mostly local, in bodies/args; ~4% top-level); consider labelling hits from files with top-level errors. Ask the user before any Chromium-scale clone.
 - [ ] **M4b** Extractors for Rust, then JS/TS, then C#; each benchmarked before the next.
 - [ ] **M5** orch integration through orch-skill's workflow (later).
 
@@ -50,3 +50,8 @@ the tool works. Background and done criteria: `../HANDOFF.md`.
   no-op update 0.92 s. Q1 includers of nsHttpChannel.h 24/24 exact (all `resolved`, 27 ms); Q3
   OnStartRequest(nsIRequest*) implementers under netwerk/ 45/45 (49 ms). Fixed: statement macros
   without `;` (NS_IMPL_ISUPPORTS...) mis-scoped the rest of the file → blanked before parsing.
+- 2026-10-30: Chromium src @0b2cf11831 (143,887 C/C++ files): index 112 s, 2.47 GB DB, lookups 19–35 ms,
+  200-file update 2.1–3.1 s. Index exact on 4/4 questions on both corpora. Haiku A/B v2: index arm
+  24/24 exact vs grep 22/24, −53% / −54% total tokens; slight token loss (+10–16%) only on Chromium
+  single-search questions. Details: `bench/RESULTS.md`. Both corpora deleted afterwards.
+  Next candidates: label hits from files with top-level parse errors; Rust extractor (D10).

@@ -29,12 +29,15 @@ def main():
     args = ap.parse_args()
     spec = json.loads(Path(args.questions).read_text())
     truth_dir = BENCH / "truth" / spec["truth_dir"]
-    print(f"| q | command | truth | hits | missed | extra | ms |\n|---|---|---|---|---|---|---|")
+    print(f"| q | command | truth | hits | missed | extra | best of 5, ms |\n|---|---|---|---|---|---|---|")
     for q in spec["questions"]:
         cmd = [str(BIN), "--repo", args.corpus, *q["index_cmd"], "--json", "--limit", "0", "--no-snippet"]
-        start = time.time()
-        out = json.loads(subprocess.run(cmd, capture_output=True, text=True, check=True).stdout)
-        ms = (time.time() - start) * 1000
+        times = []
+        for _ in range(5):
+            start = time.time()
+            out = json.loads(subprocess.run(cmd, capture_output=True, text=True, check=True).stdout)
+            times.append((time.time() - start) * 1000)
+        ms = min(times)
         truth = {l.strip() for l in (truth_dir / q["truth"]).read_text().splitlines() if l.strip()}
         got = items(q, out["hits"])
         print(f"| {q['id']} | `{' '.join(q['index_cmd'])}` | {len(truth)} | {len(got)} | "
