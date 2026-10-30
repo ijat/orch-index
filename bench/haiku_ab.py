@@ -61,6 +61,7 @@ def run_one(args, q, arm, rep, answer_format):
     except json.JSONDecodeError:
         data = {"error": proc.stderr[-2000:], "stdout": proc.stdout[-2000:]}
     data["wall_s"] = round(time.time() - start, 1)
+    data["cwd"] = str(Path(args.corpus).resolve())
     out.write_text(json.dumps(data))
     return out
 
@@ -72,8 +73,11 @@ def answer_items(result: str):
     return [l.strip().strip("`").strip() for l in blocks[-1].splitlines() if l.strip()]
 
 
-def normalize(item: str, unit: str) -> str:
+def normalize(item: str, unit: str, root: str = "") -> str:
     item = re.sub(r"^[-*\d.)\s]+", "", item).strip()
+    # Agents sometimes answer with absolute paths; make them repository-relative.
+    if root and item.startswith(root.rstrip("/") + "/"):
+        item = item[len(root.rstrip("/")) + 1:]
     if unit == "path":
         return item.split(":")[0].lstrip("./")
     if unit == "class":
@@ -81,11 +85,11 @@ def normalize(item: str, unit: str) -> str:
     return item.lstrip("./")
 
 
-def score(q, items, truth_dir):
+def score(q, items, truth_dir, root=""):
     truth = {l.strip() for l in (truth_dir / q["truth"]).read_text().splitlines() if l.strip()}
     if items is None:
         return {"tp": 0, "fp": 0, "fn": len(truth), "exact": False, "parsed": False}
-    got = {normalize(i, q["unit"]) for i in items}
+    got = {normalize(i, q["unit"], root) for i in items}
     if q["unit"] == "path:line":
         # A definition answer is right if it names the right file and line (±1 for attribute lines).
         def ok(g):
@@ -107,13 +111,13 @@ def tokens(data):
 
 
 def summarize(args, spec):
-    truth_dir = BENCH / "truth" / f"firefox-{spec['corpus']['commit'][:10]}"
+    truth_dir = BENCH / "truth" / spec["truth_dir"]
     rows = []
     for f in sorted(Path(args.out).glob("q*-*-*.json")):
         qid, arm, rep = f.stem.split("-")
         q = next(x for x in spec["questions"] if x["id"] == qid)
         data = json.loads(f.read_text())
-        s = score(q, answer_items(data.get("result", "")), truth_dir)
+        s = score(q, answer_items(data.get("result", "")), truth_dir, data.get("cwd") or args.corpus or "")
         rows.append({"q": qid, "arm": arm, "rep": rep, **s, "tokens": tokens(data),
                      "out_tokens": (data.get("usage") or {}).get("output_tokens", 0),
                      "cost": data.get("total_cost_usd", 0), "turns": data.get("num_turns", 0),

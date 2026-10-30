@@ -29,7 +29,7 @@ tmp_index=$(mktemp)
 trap 'rm -f "$tmp_index"' EXIT
 export GIT_INDEX_FILE="$tmp_index"
 git -C "$corpus" read-tree HEAD
-git -C "$corpus" ls-tree -r --name-only HEAD | grep -E '\.(cpp|h|cc)$' | awk 'NR % 97 == 0' | head -n "$n" |
+git -C "$corpus" ls-tree -r --name-only HEAD | grep -E '\.(cpp|h|cc)$' | awk -v n="$n" 'NR % 97 == 0 && c < n { c++; print }' |
 while read -r path; do
   blob=$( { git -C "$corpus" cat-file blob "HEAD:$path"; printf '\n// orch-index bench touch\n'; } |
           git -C "$corpus" hash-object -w --stdin)
