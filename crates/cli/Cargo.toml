@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Build-free structural code index for large git repositories: definitions, callers, references, includers, importers and overrides, with trust labels."
 
 [dependencies]
 anyhow = "1.0.104"

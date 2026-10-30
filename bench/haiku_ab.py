@@ -2,12 +2,14 @@
 """A/B: Haiku (orch-explorer role) answering structural questions with grep only vs with orch-index.
 
 Usage:
-  bench/haiku_ab.py --corpus DIR --bin DIR --out DIR [--questions FILE] [--reps N] [--jobs N] [--only q1,q3] [--arms grep,index]
+  bench/haiku_ab.py --corpus DIR --bin DIR --out DIR [--questions FILE] [--role FILE] [--reps N] [--jobs N] [--only q1,q3] [--arms grep,index]
   bench/haiku_ab.py --score-only --out DIR
 
 --corpus  the corpus checkout, already indexed (`orch-index index` run inside it)
 --bin     directory holding the `orch-index` binary (put on PATH for the index arm only)
 --out     results directory; one raw JSON per run plus summary.md
+--role    the agent role file used as the system prompt (default: ~/.claude/agents/orch-explorer.md,
+          the orch-explorer role from github.com/ijat/orch)
 
 Run it only on trusted corpora: the agents get Bash pre-approved inside the checkout, and a
 corpus shipping .claude/, CLAUDE.md or .mcp.json is refused.
@@ -28,12 +30,12 @@ import time
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
-ROLE = Path.home() / ".claude/agents/orch-explorer.md"
+DEFAULT_ROLE = Path.home() / ".claude/agents/orch-explorer.md"
 TOOLS = "Bash,Read,Grep,Glob"
 
 
-def role_prompt() -> str:
-    text = ROLE.read_text()
+def role_prompt(role) -> str:
+    text = Path(role).read_text()
     m = re.match(r"^---\n.*?\n---\n(.*)$", text, re.S)
     return m.group(1) if m else text
 
@@ -50,7 +52,7 @@ def run_one(args, q, arm, rep, answer_format):
     out = Path(args.out) / f"{q['id']}-{arm}-{rep}.json"
     if out.exists():
         return out
-    system = role_prompt()
+    system = role_prompt(args.role)
     env = dict(os.environ)
     if arm == "index":
         system += "\n\n" + (BENCH / "index-arm.md").read_text()
@@ -167,6 +169,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--only", default="")
     ap.add_argument("--arms", default="grep,index")
+    ap.add_argument("--role", default=str(DEFAULT_ROLE))
     ap.add_argument("--score-only", action="store_true")
     ap.add_argument("--questions", default=str(BENCH / "questions.json"))
     args = ap.parse_args()

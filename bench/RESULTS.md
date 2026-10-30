@@ -1,8 +1,7 @@
 # Results
 
-Machine: Apple Silicon Mac, APFS, warm page cache unless noted. Raw run files live outside the repo
-in `~/.claude/benchmarks/orch-index-2026-10-30/` because they contain local paths. Both corpora were
-deleted after the runs. To re-clone them, use the commands in `questions*.json`.
+Machine: Apple Silicon Mac, APFS, warm page cache unless noted. Raw run files are not committed because
+they contain local paths. Both corpora were deleted after the runs. To re-clone them, use the commands in `questions*.json`.
 
 ## Summary (2026-10-30)
 

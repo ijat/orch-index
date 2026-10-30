@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT"
+repository = "https://github.com/ijat/orch-index"
+homepage = "https://github.com/ijat/orch-index"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
