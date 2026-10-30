@@ -91,8 +91,10 @@ than the macOS and Linux builds.
 ### With cargo
 
 ```sh
-cargo install --git https://github.com/ijat/orch-index orch-index
+cargo install --git https://github.com/ijat/orch-index orch-index --locked
 ```
+
+This needs Rust 1.92 or newer and a C compiler.
 
 ### From source
 
@@ -234,9 +236,10 @@ Results and the story of what the real corpora broke: `bench/RESULTS.md`.
 
 To reproduce:
 - Timing and accuracy: build with `cargo build --release`, clone a corpus at the commit named in
-  `questions*.json`, run `bench/index_timing.sh CORPUS_DIR`, then score the index alone with
-  `bench/index_accuracy.py --corpus CORPUS_DIR --questions bench/questions-<repo>.json`. Both
-  scripts use `target/release/orch-index`.
+  `questions*.json`, run `bench/index_timing.sh CORPUS_DIR` (macOS only: it uses `/usr/bin/time -l`),
+  then score the index alone with
+  `bench/index_accuracy.py --corpus CORPUS_DIR --questions bench/questions-<repo>.json`
+  (`bench/questions.json` for Firefox). Both scripts use `target/release/orch-index`.
 - Haiku A/B: `bench/haiku_ab.py --corpus DIR --bin DIR --out DIR` needs the Claude Code CLI and the
   `orch-explorer` agent role. By default it reads `~/.claude/agents/orch-explorer.md` (the role from
   the orch skill); pass `--role FILE` to use another role file. It runs agents with Bash inside the

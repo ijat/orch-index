@@ -45,10 +45,10 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             smoke: true
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
             smoke: false # cross-compiled on an arm64 runner
           - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
@@ -91,7 +91,14 @@ jobs:
         run: |
           exe=""
           case "$TARGET" in *windows*) exe=".exe" ;; esac
-          "target/$TARGET/release/orch-index$exe" --version
+          bin="$PWD/target/$TARGET/release/orch-index$exe"
+          "$bin" --version
+          # Index this (shallow) checkout, then look up a symbol that exists in it.
+          "$bin" index
+          out=$("$bin" def Extractor)
+          echo "$out"
+          echo "$out" | grep -q 'crates/oi-lang/src/lib.rs' \
+            || { echo "def Extractor did not find crates/oi-lang/src/lib.rs" >&2; exit 1; }
       - name: Package (tar.gz)
         if: runner.os != 'Windows'
         shell: bash

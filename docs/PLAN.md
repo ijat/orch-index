@@ -2,7 +2,7 @@
 
 Working mode (2026-10-30): single session, one commit per working milestone. Code and security
 reviews are deferred until we decide to publish. The benchmark is not deferred: it is how we prove
-the tool works. Background and done criteria: `../HANDOFF.md`.
+the tool works.
 
 ## Decisions
 
