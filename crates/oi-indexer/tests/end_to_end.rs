@@ -271,6 +271,7 @@ fn languages_imports_and_damage_labels() {
 /// A repository built to hurt the indexer: none of this may crash it, stall it or let file
 /// contents forge output.
 #[test]
+#[cfg(unix)]
 fn hostile_repository() {
     use std::os::unix::ffi::OsStrExt;
     use std::time::Instant;
