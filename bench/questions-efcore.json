@@ -1,0 +1,50 @@
+{
+  "truth_dir": "efcore-716a0a9517",
+  "corpus": {
+    "repo": "https://github.com/dotnet/efcore.git",
+    "commit": "716a0a9517f963afc764b157716f733523f966c3",
+    "clone": "git clone --depth 1 <repo> (then verify HEAD == commit)"
+  },
+  "questions": [
+    {
+      "id": "def-dbcontext",
+      "truth": "def-dbcontext.txt",
+      "unit": "path:line",
+      "index_cmd": [
+        "def",
+        "DbContext",
+        "--kind",
+        "class"
+      ]
+    },
+    {
+      "id": "impl-methodcalltranslator",
+      "truth": "impl-methodcalltranslator.txt",
+      "unit": "class",
+      "index_cmd": [
+        "overrides",
+        "Translate",
+        "--base",
+        "IMethodCallTranslator"
+      ]
+    },
+    {
+      "id": "callers-usesqlserver",
+      "truth": "callers-usesqlserver.txt",
+      "unit": "path",
+      "index_cmd": [
+        "callers",
+        "UseSqlServer"
+      ]
+    },
+    {
+      "id": "importers-sqlexpressions",
+      "truth": "importers-sqlexpressions.txt",
+      "unit": "path",
+      "index_cmd": [
+        "importers",
+        "Microsoft.EntityFrameworkCore.Query.SqlExpressions"
+      ]
+    }
+  ]
+}

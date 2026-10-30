@@ -50,6 +50,9 @@ struct Output {
     /// One row per file, `path (hits) [label]`: for "which files ..." questions.
     #[arg(long)]
     files: bool,
+    /// Only hits in files of this language: cpp, rust, javascript, typescript, csharp.
+    #[arg(long)]
+    lang: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -207,6 +210,13 @@ fn run() -> Result<()> {
 }
 
 fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
+    if let Some(lang) = query_output(&command).and_then(|o| o.lang.as_deref()) {
+        anyhow::ensure!(
+            LANGS.contains(&lang),
+            "unknown --lang `{lang}` (expected one of: {})",
+            LANGS.join(", ")
+        );
+    }
     let engine = Engine::new(store, repo);
     match command {
         Command::Def { name, kind, out } => {
@@ -269,6 +279,20 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
     Ok(())
 }
 
+const LANGS: &[&str] = &["cpp", "rust", "javascript", "typescript", "csharp"];
+
+fn query_output(command: &Command) -> Option<&Output> {
+    match command {
+        Command::Def { out, .. }
+        | Command::Refs { out, .. }
+        | Command::Callers { out, .. }
+        | Command::Includers { out, .. }
+        | Command::Importers { out, .. }
+        | Command::Overrides { out, .. } => Some(out),
+        Command::Index { .. } | Command::Stats | Command::Extract { .. } => None,
+    }
+}
+
 fn print_hits(
     engine: &Engine<'_>,
     what: &str,
@@ -276,6 +300,14 @@ fn print_hits(
     out: &Output,
     snippets: bool,
 ) -> Result<()> {
+    if let Some(lang) = &out.lang {
+        let registry = oi_lang::Registry::builtin();
+        hits.retain(|h| {
+            registry
+                .for_path(&h.path)
+                .is_some_and(|e| e.lang().as_str() == lang)
+        });
+    }
     if out.files {
         return print_files(engine, what, &hits, out);
     }
@@ -426,4 +458,20 @@ fn short(sha: &str) -> &str {
 #[allow(clippy::cast_precision_loss)]
 fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1_048_576.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LANGS;
+
+    #[test]
+    fn lang_names_match_the_registry() {
+        let registry = oi_lang::Registry::builtin();
+        let sample = ["a.cc", "a.rs", "a.js", "a.ts", "a.cs"];
+        let langs: Vec<&str> = sample
+            .iter()
+            .map(|p| registry.for_path(p).expect("extractor").lang().as_str())
+            .collect();
+        assert_eq!(langs, LANGS);
+    }
 }

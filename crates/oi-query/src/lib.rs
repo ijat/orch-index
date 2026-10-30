@@ -425,6 +425,19 @@ fn names_file(resolved: &str, target: &str) -> bool {
     if resolved == target {
         return true;
     }
+    // TypeScript ESM imports name the emitted file: `./glob.js` means `glob.ts`.
+    for (js, ts) in [
+        (".js", &[".ts", ".tsx", ".d.ts"][..]),
+        (".mjs", &[".mts"]),
+        (".cjs", &[".cts"]),
+        (".jsx", &[".tsx"]),
+    ] {
+        if let Some(stem) = resolved.strip_suffix(js)
+            && ts.iter().any(|ext| target.strip_prefix(stem) == Some(ext))
+        {
+            return true;
+        }
+    }
     let Some(rest) = target.strip_prefix(resolved) else {
         return false;
     };
@@ -511,6 +524,9 @@ mod tests {
         assert!(names_file("src/a/b", "src/a/b.d.ts"));
         assert!(!names_file("src/a/b", "src/a/bc.ts"));
         assert!(!names_file("src/a/b", "src/a/b.rs"));
+        assert!(names_file("src/a/glob.js", "src/a/glob.ts"));
+        assert!(names_file("src/a/view.jsx", "src/a/view.tsx"));
+        assert!(!names_file("src/a/glob.js", "src/a/globs.ts"));
         let same = vec!["src/x/foo.ts".to_owned()];
         assert_eq!(
             classify_include("src/x/main.ts", "./foo", "src/x/foo.ts", &same),

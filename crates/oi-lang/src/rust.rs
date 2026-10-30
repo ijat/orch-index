@@ -88,7 +88,14 @@ impl<'a> Visit<'a> for Walker<'a> {
                 }
             }
             "type_identifier" => self.st.reference(node, RefKind::Type),
-            "identifier" | "field_identifier" => self.st.reference(node, RefKind::Use),
+            "identifier" | "field_identifier" => {
+                // Macro arguments are unparsed token trees; recover `f(…)`, `x.f::<T>(…)` and
+                // `m!(…)` there from the token sequence.
+                let called =
+                    node.parent().is_some_and(|p| p.kind() == "token_tree") && token_call(node);
+                self.st
+                    .reference(node, if called { RefKind::Call } else { RefKind::Use });
+            }
             _ => {}
         }
     }
@@ -196,14 +203,7 @@ impl<'a> Walker<'a> {
         let Some(func) = node.child_by_field_name("function") else {
             return;
         };
-        let target = match func.kind() {
-            "identifier" => Some(func),
-            "field_expression" => func.child_by_field_name("field"),
-            "scoped_identifier" => func.child_by_field_name("name"),
-            "generic_function" => func.child_by_field_name("function").map(last_segment),
-            _ => None,
-        };
-        if let Some(target) = target {
+        if let Some(target) = callee(func) {
             let name = self.st.text(target);
             self.st.push_ref(name, RefKind::Call, line_of(target));
             self.st.mark_name(target);
@@ -277,6 +277,52 @@ fn path_text(st: &State<'_>, node: Node<'_>) -> String {
         node
     };
     st.text(node).split_whitespace().collect()
+}
+
+/// Inside a token tree: is `ident` followed by `(…)`, `::<…>(…)` or `!`?
+fn token_call(ident: Node<'_>) -> bool {
+    let Some(mut next) = ident.next_sibling() else {
+        return false;
+    };
+    if next.kind() == "!" {
+        return true;
+    }
+    // Skip a turbofish `::<…>`, tracking angle-bracket depth across tokens.
+    if next.kind() == "::"
+        && let Some(lt) = next.next_sibling().filter(|n| n.kind() == "<")
+    {
+        let mut depth = 0usize;
+        let mut cur = Some(lt);
+        while let Some(n) = cur {
+            match n.kind() {
+                "<" => depth += 1,
+                ">" => depth = depth.saturating_sub(1),
+                ">>" => depth = depth.saturating_sub(2),
+                _ => {}
+            }
+            cur = n.next_sibling();
+            if depth == 0 {
+                break;
+            }
+        }
+        match cur {
+            Some(n) => next = n,
+            None => return false,
+        }
+    }
+    next.kind() == "token_tree" && next.child(0).is_some_and(|open| open.kind() == "(")
+}
+
+/// The name node a call expression's `function` calls: `f`, `a::f`, `x.f`, and the same with
+/// turbofish generics (`x.f::<T>`).
+fn callee(func: Node<'_>) -> Option<Node<'_>> {
+    match func.kind() {
+        "identifier" => Some(func),
+        "field_expression" => func.child_by_field_name("field"),
+        "scoped_identifier" => func.child_by_field_name("name"),
+        "generic_function" => callee(func.child_by_field_name("function")?),
+        _ => None,
+    }
 }
 
 /// The last name in a possibly scoped path node.

@@ -20,6 +20,38 @@ deleted after the runs. To re-clone them, use the commands in `questions*.json`.
 
 Chromium here is `chromium/src` only. DEPS-pulled repos (V8, Skia and others) are not included.
 
+## Other languages (2026-10-30, index alone vs independent ground truth)
+
+Shallow clones, deleted afterwards. Ground truth was built by `bench/language_truth.py` from
+`git grep -P`, Python regexes and path normalization (no tree-sitter), with every discrepancy read in
+the source. Re-check with `bench/index_accuracy.py --questions bench/questions-<repo>.json`.
+
+| Language (corpus @ commit) | Files indexed / time | Questions | Result | Lookup |
+|---|---|---|---|---|
+| Rust (rust-analyzer @ 9e0d1ec24e) | 1,528 / 1.1 s | def struct, trait implementers (37), callers in files (105) | 3/3 exact | 19–20 ms |
+| TypeScript (vscode @ 0d958c41dd) | 15,683 / 15 s | def class (3), includers of `glob.ts` (66), callers (682 files), transitive interface implementers (14) | 4/4 exact | 19–21 ms |
+| JavaScript (node `lib/` @ 97aed16adb) | 43,772 (mixed) / 24 s | def, `require` importers (178), callers (30) | 3/3 exact | 20 ms |
+| C# (efcore @ 716a0a9517) | 5,856 / 4.1 s | def class (3), interface implementers (60), callers (59 files), `using` importers (168) | 4/4 exact | 19–22 ms |
+| C++ regression (node `src/`) | (same index) | includers of `env-inl.h` (139), def `Environment` | exact | — |
+
+What the real corpora caught, all fixed with tests:
+- TS ESM imports name the emitted file (`./glob.js` for `glob.ts`). The resolver now maps `.js` to `.ts`.
+- Rust turbofish method calls (`ctx.find::<T>()`) were missed, at 25 of 100 files. Calls inside macro
+  arguments (`vec![f()]`, `assert_eq!(g(x), 1)`) were invisible, because tree-sitter keeps those as
+  raw token trees. Both are now recovered.
+
+Instrument errors found while building truth, each resolved by reading the source in the index's
+favour: `export`-only class regex; `.tsx` not searched; type arguments containing parentheses or
+nested generics; calls inside template or raw strings (not real calls); transitive implementers;
+`#include <…>` spellings.
+
+Syntax-error rates are grammar or test-data effects, not extractor bugs:
+- rust-analyzer: `crates/parser/test_data` is intentionally broken.
+- node: V8's `%Native` test syntax, plus macro-heavy C++ in V8 and OpenSSL.
+- efcore: tree-sitter-c-sharp mishandles `async` as a parameter name, which causes local errors.
+
+Hits from files with declaration-level errors are labelled `parse-errors`.
+
 ## Questions and ground truth
 
 Ground truth is in `bench/truth/<corpus>/`. It was built with `git grep` / `git grep -P`, plus a Python
@@ -86,8 +118,10 @@ reused. v1 numbers are in the raw directories `ab-run1` and `ab-chromium`.
 
 - References match by name (`syntactic`). For generic names (`Init`), filter with `--path` or by the
   calling function in the detail.
-- 24% of Chromium and 41% of Firefox C/C++ files still have at least one tree-sitter error. Most are
-  local (inside function bodies or argument lists) and harmless to these queries, but hits from such
-  files are not yet labelled.
+- 24% of Chromium and 41% of Firefox C/C++ files have at least one tree-sitter error. Most are local
+  and harmless. Since 2026-10-30, hits from files with *declaration-level* errors are labelled
+  `parse-errors`.
 - Objective-C(++) is parsed with the C++ grammar: best effort.
+- Cross-language links (JS↔C++ bindings, FFI, IDL) are not modelled. In a mixed repo, name-based
+  references can mix languages; filter with `--lang`.
 - No compiler-backed (`compiler`) data yet; SCIP ingestion is a later milestone.

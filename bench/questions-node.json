@@ -1,0 +1,45 @@
+{
+  "truth_dir": "node-97aed16adb",
+  "corpus": {
+    "repo": "https://github.com/nodejs/node.git",
+    "commit": "97aed16adb90a720308d7ebea417c9a9db81ea26",
+    "clone": "git clone --depth 1 <repo> (then verify HEAD == commit)"
+  },
+  "questions": [
+    {
+      "id": "def-validatestring",
+      "truth": "def-validatestring.txt",
+      "unit": "path:line",
+      "index_cmd": [
+        "def",
+        "validateString",
+        "--lang",
+        "javascript",
+        "--path",
+        "lib/"
+      ]
+    },
+    {
+      "id": "importers-validators",
+      "truth": "importers-validators.txt",
+      "unit": "path",
+      "index_cmd": [
+        "importers",
+        "internal/validators",
+        "--path",
+        "lib/"
+      ]
+    },
+    {
+      "id": "callers-experimental",
+      "truth": "callers-experimental.txt",
+      "unit": "path",
+      "index_cmd": [
+        "callers",
+        "emitExperimentalWarning",
+        "--path",
+        "lib/"
+      ]
+    }
+  ]
+}

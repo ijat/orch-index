@@ -48,6 +48,9 @@ pub mod net {
         fn on_start(&mut self, req: &Request) -> bool {
             helper(req);
             self.inner.poll();
+            let n = ctx.find_node::<ast::Loop>()?;
+            let m = parse::<u8>(s);
+            let v = vec![ctx.find_in_macro::<Either<A, B>>()?, plain(1), inner!(x)];
             log!("started");
             true
         }
@@ -78,7 +81,17 @@ fn helper(r: &Request) {}
     assert_eq!(sym(&f, "Channel", SymbolKind::Struct).scope, "net");
     assert_eq!(sym(&f, "count", SymbolKind::Field).scope, "net::Channel");
     assert_eq!(sym(&f, "Busy", SymbolKind::Enumerator).scope, "net::State");
-    assert_eq!(sym(&f, "log", SymbolKind::Macro).line, 28);
+    assert_eq!(sym(&f, "log", SymbolKind::Macro).line, 31);
+    for name in ["find_in_macro", "plain", "inner"] {
+        assert_eq!(call(&f, name).line, 18, "{name}");
+    }
+    assert!(
+        !f.references
+            .iter()
+            .any(|r| r.name == "Either" && r.kind == RefKind::Call)
+    );
+    assert_eq!(call(&f, "find_node").line, 16);
+    assert_eq!(call(&f, "parse").line, 17);
     assert_eq!(bases(&f), [("Channel".into(), "Listener".into())]);
 
     let impls: Vec<_> = f
@@ -113,7 +126,7 @@ fn helper(r: &Request) {}
         Some("net::Channel::on_start")
     );
     assert_eq!(call(&f, "poll").line, 15);
-    assert_eq!(call(&f, "log").line, 16);
+    assert_eq!(call(&f, "log").line, 19);
     assert!(
         f.references
             .iter()

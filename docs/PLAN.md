@@ -39,7 +39,7 @@ the tool works. Background and done criteria: `../HANDOFF.md`.
       2026-10-30 ground truth (Q1 includers of `nsHttpChannel.h` = 24; Q3 `OnStartRequest` implementers = 45);
       Haiku+index vs Haiku+grep on tokens and accuracy. Scripts + results in `bench/`.
 - [~] **M4** Fix what the numbers show (Chromium-scale run done 2026-10-30, src only). Known: 43% of Firefox C/C++ files have ≥1 tree-sitter error (mostly local, in bodies/args; ~4% top-level); consider labelling hits from files with top-level errors. Ask the user before any Chromium-scale clone.
-- [ ] **M4b** Extractors for Rust, then JS/TS, then C#; each benchmarked before the next.
+- [x] **M4b** Extractors for Rust, JS/TS and C#, validated on rust-analyzer, vscode, node and efcore (index vs ground truth; Haiku A/B not run per language).
 - [ ] **M5** orch integration through orch-skill's workflow (later).
 
 ## Log
@@ -55,3 +55,6 @@ the tool works. Background and done criteria: `../HANDOFF.md`.
   24/24 exact vs grep 22/24, −53% / −54% total tokens; slight token loss (+10–16%) only on Chromium
   single-search questions. Details: `bench/RESULTS.md`. Both corpora deleted afterwards.
   Next candidates: label hits from files with top-level parse errors; Rust extractor (D10).
+- 2026-10-30: languages done on a shared walker (`walk.rs`); `importers`, `--lang`, `--files`,
+  `parse-errors` labels. 14/14 exact on four real repos after fixing TS `.js`→`.ts` imports and Rust
+  turbofish / macro-argument calls. Next: code review, security review, push (private GitHub).

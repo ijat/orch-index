@@ -1,0 +1,14 @@
+AbstractEditorNavigationQuickAccessProvider
+AnythingQuickAccessProvider
+BaseEditorQuickAccessProvider
+BoundDefaultProvider
+GotoSymbolQuickAccessProvider
+HelpQuickAccessProvider
+McpResourceQuickAccess
+PickerQuickAccessProvider
+PrefixedProvider
+TestProvider1
+TestProvider2
+TestProvider3
+TestProviderDefault
+TextSearchQuickAccess

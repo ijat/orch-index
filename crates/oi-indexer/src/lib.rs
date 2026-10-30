@@ -16,7 +16,7 @@ use rayon::iter::{ParallelBridge, ParallelIterator};
 
 /// Bump whenever extraction output changes, so existing indexes re-extract every file instead of
 /// keeping facts from the old extractor for unchanged blobs.
-pub const EXTRACTOR_VERSION: &str = "5";
+pub const EXTRACTOR_VERSION: &str = "7";
 
 /// Blobs larger than this are skipped; at this size C/C++ is almost always generated.
 pub const DEFAULT_MAX_FILE_BYTES: usize = 4 << 20;

@@ -1,0 +1,43 @@
+{
+  "truth_dir": "rust-analyzer-9e0d1ec24e",
+  "corpus": {
+    "repo": "https://github.com/rust-lang/rust-analyzer.git",
+    "commit": "9e0d1ec24eb81de12160ecfa7f31c89735bda951",
+    "clone": "git clone --depth 1 <repo> (then verify HEAD == commit)"
+  },
+  "questions": [
+    {
+      "id": "def-semantics",
+      "truth": "def-semantics.txt",
+      "unit": "path:line",
+      "index_cmd": [
+        "def",
+        "Semantics",
+        "--kind",
+        "struct"
+      ]
+    },
+    {
+      "id": "impl-hirdisplay",
+      "truth": "impl-hirdisplay.txt",
+      "unit": "class",
+      "index_cmd": [
+        "overrides",
+        "hir_fmt",
+        "--base",
+        "HirDisplay"
+      ]
+    },
+    {
+      "id": "callers-find-node",
+      "truth": "callers-find-node.txt",
+      "unit": "path",
+      "index_cmd": [
+        "callers",
+        "find_node_at_offset",
+        "--lang",
+        "rust"
+      ]
+    }
+  ]
+}

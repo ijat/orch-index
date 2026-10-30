@@ -1,0 +1,53 @@
+{
+  "truth_dir": "vscode-0d958c41dd",
+  "corpus": {
+    "repo": "https://github.com/microsoft/vscode.git",
+    "commit": "0d958c41dd9dbfb1da6cff3469d5990b46fa2212",
+    "clone": "git clone --depth 1 <repo> (then verify HEAD == commit)"
+  },
+  "questions": [
+    {
+      "id": "def-textmodel",
+      "truth": "def-textmodel.txt",
+      "unit": "path:line",
+      "index_cmd": [
+        "def",
+        "TextModel",
+        "--kind",
+        "class"
+      ]
+    },
+    {
+      "id": "includers-glob",
+      "truth": "includers-glob.txt",
+      "unit": "path",
+      "index_cmd": [
+        "includers",
+        "src/vs/base/common/glob.ts",
+        "--files"
+      ]
+    },
+    {
+      "id": "callers-createdecorator",
+      "truth": "callers-createdecorator.txt",
+      "unit": "path",
+      "index_cmd": [
+        "callers",
+        "createDecorator",
+        "--lang",
+        "typescript"
+      ]
+    },
+    {
+      "id": "impl-quickaccess",
+      "truth": "impl-quickaccess.txt",
+      "unit": "class",
+      "index_cmd": [
+        "overrides",
+        "provide",
+        "--base",
+        "IQuickAccessProvider"
+      ]
+    }
+  ]
+}
