@@ -2,7 +2,7 @@
 """A/B: Haiku (orch-explorer role) answering structural questions with grep only vs with orch-index.
 
 Usage:
-  bench/haiku_ab.py --corpus DIR --bin DIR --out DIR [--reps N] [--jobs N] [--only q1,q3] [--arms grep,index]
+  bench/haiku_ab.py --corpus DIR --bin DIR --out DIR [--questions FILE] [--reps N] [--jobs N] [--only q1,q3] [--arms grep,index]
   bench/haiku_ab.py --score-only --out DIR
 
 --corpus  the corpus checkout, already indexed (`orch-index index` run inside it)
@@ -157,8 +157,9 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--arms", default="grep,index")
     ap.add_argument("--score-only", action="store_true")
+    ap.add_argument("--questions", default=str(BENCH / "questions.json"))
     args = ap.parse_args()
-    spec = json.loads((BENCH / "questions.json").read_text())
+    spec = json.loads(Path(args.questions).read_text())
     Path(args.out).mkdir(parents=True, exist_ok=True)
     if not args.score_only:
         if not (args.corpus and args.bin):

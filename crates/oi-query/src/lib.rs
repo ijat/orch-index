@@ -157,8 +157,10 @@ impl<'a> Engine<'a> {
 
     /// Classes that declare or define method `method`, one hit per class.
     ///
-    /// With `base`, only classes deriving from it (transitively, by name) are kept. With
-    /// `signature`, only methods whose normalized parameter list matches.
+    /// With `base`, only classes deriving from it (transitively) are kept, and the base itself is
+    /// left out. Inheritance is followed by qualified name: `class X : public URLRequest::Delegate`
+    /// matches base `net::URLRequest::Delegate`, while an unrelated `Delegate` does not. With
+    /// `signature`, only methods whose parameter list matches (namespace qualifiers ignored).
     pub fn overrides(
         &self,
         method: &str,
@@ -166,19 +168,27 @@ impl<'a> Engine<'a> {
         signature: Option<&str>,
         path: Option<&str>,
     ) -> Result<Vec<Hit>> {
-        let derived = base.map(|b| self.derived_closure(b)).transpose()?;
+        let bases = base.map(|b| self.resolve_class(b)).transpose()?;
+        let derived = bases
+            .as_ref()
+            .map(|b| self.derived_closure(b))
+            .transpose()?;
         let wanted_sig = signature.map(normalize_signature);
         let mut by_class: BTreeMap<String, Vec<SymbolHit>> = BTreeMap::new();
         for s in self.store.symbols(method, &[SymbolKind::Method], path)? {
-            if wanted_sig
-                .as_ref()
-                .is_some_and(|w| normalize_signature(&s.signature) != *w)
+            if s.scope.is_empty()
+                || wanted_sig
+                    .as_ref()
+                    .is_some_and(|w| normalize_signature(&s.signature) != *w)
             {
                 continue;
             }
-            let class = s.scope.rsplit("::").next().unwrap_or("").to_owned();
-            if class.is_empty() || derived.as_ref().is_some_and(|d| !d.contains(&class)) {
-                continue;
+            if let (Some(bases), Some(derived)) = (&bases, &derived) {
+                let in_closure = derived.iter().any(|d| same_class(d, &s.scope));
+                let is_base = bases.iter().any(|b| same_class(b, &s.scope));
+                if !in_closure || is_base {
+                    continue;
+                }
             }
             by_class.entry(s.scope.clone()).or_default().push(s);
         }
@@ -189,10 +199,10 @@ impl<'a> Engine<'a> {
                 rows.sort_by_key(|s| (s.is_definition, s.path.clone(), s.line));
                 let first = rows.first()?;
                 let mut hit = symbol_hit(first);
-                hit.detail = format!("{}{}", first.scope, first.signature);
+                hit.detail = format!("{} {}", first.scope, first.signature);
                 let defs = rows.iter().filter(|s| s.is_definition).count();
                 hit.note = Some(match (first.is_definition, defs) {
-                    (true, _) => "definition only".to_owned(),
+                    (true, _) => "defined".to_owned(),
                     (false, 0) => "declared".to_owned(),
                     (false, _) => "declared+defined".to_owned(),
                 });
@@ -201,15 +211,40 @@ impl<'a> Engine<'a> {
             .collect())
     }
 
-    /// Names of every class deriving from `base`, directly or indirectly.
-    fn derived_closure(&self, base: &str) -> Result<HashSet<String>> {
-        let (_, base) = split_qualified(base);
-        let mut seen = HashSet::new();
-        let mut queue = VecDeque::from([base.to_owned()]);
-        while let Some(b) = queue.pop_front() {
-            for edge in self.store.derived_of(&b)? {
-                if seen.insert(edge.derived.clone()) {
-                    queue.push_back(edge.derived);
+    /// Qualified names of the classes `name` may refer to (`URLRequest::Delegate` →
+    /// `net::URLRequest::Delegate`). Falls back to `name` itself if no class is indexed under it.
+    fn resolve_class(&self, name: &str) -> Result<Vec<String>> {
+        let name = name.trim_start_matches("::");
+        let (scope, base) = split_qualified(name);
+        let kinds = [SymbolKind::Class, SymbolKind::Struct, SymbolKind::Union];
+        let mut found: Vec<String> = self
+            .store
+            .symbols(base, &kinds, None)?
+            .into_iter()
+            .filter(|s| scope.is_none_or(|q| scope_matches(&s.scope, q)))
+            .map(|s| qualify(&s.scope, base))
+            .collect();
+        found.sort();
+        found.dedup();
+        if found.is_empty() {
+            found.push(name.to_owned());
+        }
+        Ok(found)
+    }
+
+    /// Qualified names of every class deriving from any of `bases`, directly or indirectly.
+    fn derived_closure(&self, bases: &[String]) -> Result<HashSet<String>> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = bases.iter().cloned().collect();
+        while let Some(class) = queue.pop_front() {
+            let last = class.rsplit("::").next().unwrap_or(&class);
+            for edge in self.store.derived_of(last)? {
+                if !base_edge_names(&class, &edge.base_written, &edge.derived_scope) {
+                    continue;
+                }
+                let derived = qualify(&edge.derived_scope, &edge.derived);
+                if seen.insert(derived.clone()) {
+                    queue.push_back(derived);
                 }
             }
         }
@@ -260,6 +295,35 @@ fn symbol_hit(s: &SymbolHit) -> Hit {
     }
 }
 
+fn qualify(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+/// Whether two qualified class names can denote the same class: equal, or one is the other with
+/// outer scopes omitted (`net::Foo` vs `Foo`), compared at `::` boundaries.
+fn same_class(a: &str, b: &str) -> bool {
+    a == b || scope_matches(a, b) || scope_matches(b, a)
+}
+
+/// Whether a base written as `written`, in a class defined in scope `derived_scope`, can name the
+/// class `class` (fully qualified). An unqualified or partly qualified spelling only counts where
+/// name lookup could reach it: the derived class must live inside the scope it was omitted from.
+fn base_edge_names(class: &str, written: &str, derived_scope: &str) -> bool {
+    let written = written.trim_start_matches("::");
+    if class == written || scope_matches(written, class) {
+        return true;
+    }
+    if !scope_matches(class, written) {
+        return false;
+    }
+    let omitted = &class[..class.len() - written.len() - 2];
+    derived_scope == omitted || derived_scope.starts_with(&format!("{omitted}::"))
+}
+
 /// `a::b::name` → (`Some("a::b")`, `"name"`).
 fn split_qualified(name: &str) -> (Option<&str>, &str) {
     match name.rsplit_once("::") {
@@ -298,8 +362,30 @@ fn relative_target(includer: &str, spec: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// Whitespace-free parameter list with namespace qualifiers dropped, so `(net::URLRequest*, int)`
+/// and `(URLRequest *, int)` compare equal. Syntactic: it cannot tell two same-named types apart.
 fn normalize_signature(sig: &str) -> String {
-    sig.chars().filter(|c| !c.is_whitespace()).collect()
+    // Whitespace is removed only at the end, so `const ::T` keeps `const` apart from the qualifier.
+    let mut out = String::with_capacity(sig.len());
+    let mut ident = String::new();
+    let mut chars = sig.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            ident.push(c);
+            continue;
+        }
+        if c == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            ident.clear(); // drop the qualifier
+            continue;
+        }
+        out.push_str(&ident);
+        ident.clear();
+        out.push(c);
+    }
+    out.push_str(&ident);
+    out.retain(|c| !c.is_whitespace());
+    out
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -327,6 +413,36 @@ mod tests {
             Some("a/d.h")
         );
         assert_eq!(relative_target("c.cpp", "../d.h"), None);
+    }
+
+    #[test]
+    fn signatures_ignore_qualifiers_and_spacing() {
+        assert_eq!(
+            normalize_signature("(net::URLRequest* request_, int)"),
+            normalize_signature("(URLRequest *request_, int)")
+        );
+        assert_eq!(normalize_signature("(const ::a::b::T&)"), "(constT&)");
+        assert_ne!(
+            normalize_signature("(URLRequest*)"),
+            normalize_signature("(URLRequest*, int)")
+        );
+    }
+
+    #[test]
+    fn base_edges_respect_lookup_scope() {
+        let base = "net::URLRequest::Delegate";
+        assert!(base_edge_names(base, "URLRequest::Delegate", "net"));
+        assert!(base_edge_names(
+            base,
+            "net::URLRequest::Delegate",
+            "network"
+        ));
+        assert!(base_edge_names(base, "::net::URLRequest::Delegate", ""));
+        // A bare `Delegate` elsewhere is some other class.
+        assert!(!base_edge_names(base, "Delegate", "net"));
+        assert!(base_edge_names(base, "Delegate", "net::URLRequest"));
+        assert!(!base_edge_names(base, "Other::Delegate", "net"));
+        assert!(same_class("net::Foo", "Foo") && !same_class("net::Foo", "net::XFoo"));
     }
 
     #[test]

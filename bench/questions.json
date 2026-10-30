@@ -11,25 +11,47 @@
       "id": "q1",
       "prompt": "List every file in this repository that #includes netwerk/protocol/http/nsHttpChannel.h directly, with any include spelling. Search the whole tree. Answer items: repository-relative file paths.",
       "truth": "q1-includers.txt",
-      "unit": "path"
+      "unit": "path",
+      "index_cmd": [
+        "includers",
+        "netwerk/protocol/http/nsHttpChannel.h"
+      ]
     },
     {
       "id": "q2",
       "prompt": "Where is the C++ class nsHttpChannel defined (the class definition with its body, not a forward declaration)? Answer item: one path:line.",
       "truth": "q2-def.txt",
-      "unit": "path:line"
+      "unit": "path:line",
+      "index_cmd": [
+        "def",
+        "nsHttpChannel",
+        "--kind",
+        "class"
+      ]
     },
     {
       "id": "q3",
       "prompt": "Under netwerk/, which C++ classes declare or define the method OnStartRequest(nsIRequest*)? Exclude overloads with other parameter types. Answer items: class names without namespaces.",
       "truth": "q3-implementers.txt",
-      "unit": "class"
+      "unit": "class",
+      "index_cmd": [
+        "overrides",
+        "OnStartRequest",
+        "--sig",
+        "(nsIRequest*)",
+        "--path",
+        "netwerk/"
+      ]
     },
     {
       "id": "q4",
       "prompt": "Which C/C++ files call the function NS_GetFinalChannelURI? Count only real calls, not declarations, definitions, comments or strings. Search the whole tree. Answer items: repository-relative file paths.",
       "truth": "q4-caller-files.txt",
-      "unit": "path"
+      "unit": "path",
+      "index_cmd": [
+        "callers",
+        "NS_GetFinalChannelURI"
+      ]
     }
   ]
 }

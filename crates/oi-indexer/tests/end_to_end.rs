@@ -104,7 +104,7 @@ fn index_query_and_update() {
         )
         .unwrap();
     let classes: Vec<_> = over.iter().map(|h| h.detail.as_str()).collect();
-    assert_eq!(classes, ["Channel(nsIRequest*)", "Loader(nsIRequest*)"]);
+    assert_eq!(classes, ["Channel (nsIRequest*)", "Loader (nsIRequest*)"]);
     assert_eq!(over[0].note.as_deref(), Some("declared+defined"));
 
     let mut calls = engine

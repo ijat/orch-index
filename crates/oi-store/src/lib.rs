@@ -72,7 +72,9 @@ pub struct BaseHit {
     pub path: String,
     pub line: u32,
     pub derived: String,
-    pub base: String,
+    pub derived_scope: String,
+    /// The base as written at the edge, e.g. `URLRequest::Delegate`.
+    pub base_written: String,
 }
 
 pub struct Store {
@@ -248,7 +250,7 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(
-            "SELECT f.path, b.line, d.name
+            "SELECT f.path, b.line, d.name, b.derived_scope, b.written
              FROM bases b JOIN files f ON f.id = b.file_id JOIN names d ON d.id = b.derived_id
              WHERE b.base_id = ?1 ORDER BY f.path, b.line",
         )?;
@@ -257,7 +259,8 @@ impl Store {
                 path: r.get(0)?,
                 line: r.get(1)?,
                 derived: r.get(2)?,
-                base: base.to_owned(),
+                derived_scope: r.get(3)?,
+                base_written: r.get(4)?,
             })
         })?;
         rows.map(|r| r.map_err(Into::into)).collect()
@@ -398,9 +401,17 @@ impl Writer<'_> {
             let base_id = self.intern(&b.base)?;
             self.tx
                 .prepare_cached(
-                    "INSERT INTO bases (file_id, line, derived_id, base_id) VALUES (?1, ?2, ?3, ?4)",
+                    "INSERT INTO bases (file_id, line, derived_id, derived_scope, base_id, written)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )?
-                .execute(params![file_id, b.line, derived_id, base_id])?;
+                .execute(params![
+                    file_id,
+                    b.line,
+                    derived_id,
+                    b.derived_scope,
+                    base_id,
+                    b.base_written
+                ])?;
         }
         Ok(())
     }

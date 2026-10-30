@@ -202,8 +202,12 @@ pub struct Include {
 pub struct BaseClass {
     /// Name of the derived class (unqualified).
     pub derived: String,
-    /// Base as written, last path segment only (template arguments stripped).
+    /// Scope the derived class is defined in, e.g. `mozilla::net`.
+    pub derived_scope: String,
+    /// Base, last path segment only (template arguments stripped).
     pub base: String,
+    /// Base as written, qualifiers kept, template arguments stripped, e.g. `URLRequest::Delegate`.
+    pub base_written: String,
     pub line: u32,
 }
 

@@ -232,7 +232,13 @@ impl<'a> Walker<'a> {
             "call_expression" => self.call(node),
             "type_identifier" => self.reference(node, RefKind::Type),
             "identifier" | "field_identifier" | "namespace_identifier" => {
-                self.reference(node, RefKind::Use);
+                // Inside error recovery (e.g. Objective-C in a .mm file) no call_expression is
+                // built, but `name(` is still a call.
+                let called = node.parent().is_some_and(|p| p.is_error())
+                    && node
+                        .next_sibling()
+                        .is_some_and(|s| matches!(s.kind(), "(" | "argument_list"));
+                self.reference(node, if called { RefKind::Call } else { RefKind::Use });
             }
             _ => {}
         }
@@ -290,7 +296,7 @@ impl<'a> Walker<'a> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.kind() == "base_class_clause" {
-                self.bases(child, &name);
+                self.bases(child, &name, &scope);
             }
         }
         if let Some(body) = body {
@@ -305,18 +311,21 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn bases(&mut self, clause: Node<'_>, derived: &str) {
+    fn bases(&mut self, clause: Node<'_>, derived: &str, derived_scope: &str) {
         let mut cursor = clause.walk();
         for child in clause.named_children(&mut cursor) {
-            let base = match child.kind() {
+            let (qualifiers, base) = match child.kind() {
                 "type_identifier" | "qualified_identifier" | "template_type" => {
-                    self.split_name(child, false).1
+                    self.split_name(child, false)
                 }
                 _ => continue,
             };
+            let base_written = join_scope(&qualifiers.join("::"), std::slice::from_ref(&base));
             self.facts.bases.push(BaseClass {
                 derived: derived.to_owned(),
+                derived_scope: derived_scope.to_owned(),
                 base,
+                base_written,
                 line: line_of(child),
             });
         }

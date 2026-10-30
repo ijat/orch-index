@@ -1,0 +1,88 @@
+chrome/browser/android/policy/policy_auditor.cc:44:    if (net::IsCertStatusError(ssl.cert_status)) {
+chrome/browser/devtools/protocol/devtools_protocol_browsertest.cc:1588:  if (net::IsCertStatusError(entry->GetSSL().cert_status)) {
+chrome/browser/devtools/protocol/security_handler.cc:134:  if (net::IsCertStatusError(state.cert_status)) {
+chrome/browser/net/qwac_web_contents_observer.cc:195:          !net::IsCertStatusError(ssl_info->cert_status) &&
+chrome/browser/net/websocket_browsertest.cc:1262:  ASSERT_FALSE(net::IsCertStatusError(ssl_info->cert_status));
+chrome/browser/password_manager/chrome_password_manager_client.cc:323:  const bool ssl_errors = net::IsCertStatusError(GetMainFrameCertStatus());
+chrome/browser/ssl/security_state_tab_helper_browsertest.cc:206:            net::IsCertStatusError(visible_security_state->cert_status));
+chrome/browser/ssl/security_state_tab_helper_browsertest.cc:224:  EXPECT_FALSE(net::IsCertStatusError(visible_security_state->cert_status));
+chrome/browser/ssl/security_state_tab_helper_browsertest.cc:404:  EXPECT_FALSE(net::IsCertStatusError(visible_security_state->cert_status));
+chrome/browser/ssl/security_state_tab_helper_browsertest.cc:639:  EXPECT_FALSE(net::IsCertStatusError(visible_security_state->cert_status));
+chrome/browser/ssl/security_state_tab_helper_browsertest.cc:666:  EXPECT_FALSE(net::IsCertStatusError(visible_security_state->cert_status));
+chrome/browser/ssl/security_state_tab_helper_browsertest.cc:695:  EXPECT_FALSE(net::IsCertStatusError(visible_security_state->cert_status));
+chrome/browser/ssl/typed_navigation_upgrade_throttle.cc:133:  if (!net::IsCertStatusError(cert_status) &&
+chrome/browser/ssl/typed_navigation_upgrade_throttle.cc:138:  if (net::IsCertStatusError(cert_status)) {
+chrome/browser/ui/toolbar/chrome_location_bar_model_delegate.cc:89:  return net::IsCertStatusError(GetVisibleSecurityState()->cert_status);
+chrome/browser/ui/views/omnibox/omnibox_view_views.cc:894:  if (net::IsCertStatusError(controller()->client()->GetCertStatus())) {
+chrome/browser/ui/views/omnibox/webui_readonly_omnibox.cc:465:  if (net::IsCertStatusError(controller()->client()->GetCertStatus())) {
+chrome/browser/ui/webui/cr_components/searchbox/searchbox_handler.cc:1250:      if (net::IsCertStatusError(client->GetCertStatus())) {
+components/android_autofill/browser/android_autofill_client.cc:298:         !net::IsCertStatusError(ssl_status.cert_status) &&
+components/autofill/ios/browser/autofill_util.mm:149:         !net::IsCertStatusError(ssl.cert_status);
+components/credential_management/android/third_party_credential_manager_impl.cc:137:  if (net::IsCertStatusError(GetMainFrameCertStatus()) || IsOffTheRecord() ||
+components/download/internal/common/download_utils.cc:257:    if (net::IsCertStatusError(cert_status)) {
+components/page_info/page_info.cc:198:  if (!net::IsCertStatusError(visible_security_state.cert_status)) {
+components/page_info/page_info.cc:1108:      (!net::IsCertStatusError(visible_security_state.cert_status))) {
+components/password_manager/core/browser/credential_manager_pending_request_task.cc:151:  CHECK(!net::IsCertStatusError(delegate_->client()->GetMainFrameCertStatus()));
+components/security_interstitials/content/ssl_error_handler.cc:1032:         !net::IsCertStatusError(other_errors);
+components/security_interstitials/content/ssl_error_navigation_throttle.cc:72:      !net::IsCertStatusError(
+components/security_interstitials/content/ssl_error_navigation_throttle.cc:111:  if (!net::IsCertStatusError(cert_status)) {
+components/security_state/core/security_state.cc:87:  DCHECK(!net::IsCertStatusError(visible_security_state.cert_status));
+components/security_state/core/security_state.cc:178:      net::IsCertStatusError(visible_security_state.cert_status);
+content/browser/devtools/protocol/network_handler.cc:678:  if (net::IsCertStatusError(cert_status)) {
+content/browser/renderer_host/mixed_content_navigation_throttle.cc:77:  if (!net::IsCertStatusError(navigation_handle()->GetSSLInfo()->cert_status)) {
+content/browser/renderer_host/render_frame_host_impl.cc:12067:      final_response_url, net::IsCertStatusError(cert_status));
+content/browser/service_worker/service_worker_browsertest.cc:443:  EXPECT_FALSE(net::IsCertStatusError(entry->GetSSL().cert_status));
+content/browser/service_worker/service_worker_loader_helpers.cc:192:      net::IsCertStatusError(response_head.cert_status) &&
+content/browser/site_per_process_browsertest.cc:5273:  EXPECT_TRUE(net::IsCertStatusError(entry->GetSSL().cert_status));
+content/browser/web_contents/web_contents_impl.cc:8252:        ssl_info.has_value() ? net::IsCertStatusError(ssl_info->cert_status)
+content/browser/web_contents/web_contents_impl.cc:12824:  if (!net::IsCertStatusError(ssl_status.cert_status)) {
+content/browser/web_package/signed_exchange_handler.cc:676:  ssl_info.is_fatal_cert_error = net::IsCertStatusError(ssl_info.cert_status);
+content/browser/web_package/signed_exchange_handler_unittest.cc:275:        net::IsCertStatusError(result.cert_status)
+content/browser/web_package/signed_exchange_loader.cc:308:      net::IsCertStatusError(ssl_info->cert_status)) {
+content/browser/web_package/signed_exchange_loader.cc:379:              net::IsCertStatusError(ssl_info_->cert_status),
+content/common/webid/identity_url_loader_throttle.cc:147:  if (net::IsCertStatusError(response_head.cert_status) &&
+extensions/browser/api/web_request/web_request_event_details.cc:223:    if (net::IsCertStatusError(request.ssl_info->cert_status)) {
+headless/test/headless_browser_browsertest.cc:735:  EXPECT_FALSE(net::IsCertStatusError(last_entry->GetSSL().cert_status));
+ios/chrome/browser/page_info/coordinator/page_info_site_security_mediator.mm:118:  if (net::IsCertStatusError(status.cert_status) ||
+ios/chrome/browser/passwords/model/ios_chrome_password_manager_client.mm:411:         !net::IsCertStatusError(GetMainFrameCertStatus()) &&
+ios/web/security/crw_cert_verification_controller.mm:149:      if (!net::IsCertStatusError(certStatus)) {
+ios/web/web_state/ui/crw_web_controller.mm:1708:  if (item && !net::IsCertStatusError(item->GetSSL().cert_status)) {
+ios/web_view/internal/passwords/web_view_password_manager_client.mm:290:         !net::IsCertStatusError(GetMainFrameCertStatus()) &&
+net/cert/cert_verify_proc_android.cc:387:  } else if (!IsCertStatusError(verify_result->cert_status)) {
+net/cert/cert_verify_proc_android.cc:455:  if (IsCertStatusError(verify_result->cert_status))
+net/cert/cert_verify_proc_builtin.cc:1510:  if (!IsCertStatusError(*cert_status))
+net/cert/cert_verify_proc_builtin.cc:1707:  CHECK(path_is_valid || IsCertStatusError(verify_result->cert_status));
+net/cert/cert_verify_proc_builtin.cc:1714:  if (IsCertStatusError(verify_result->cert_status)) {
+net/cert/cert_verify_proc_builtin.cc:2160:    CHECK(IsCertStatusError(verify_result->cert_status));
+net/cert/cert_verify_proc_builtin.cc:2170:  if (IsCertStatusError(verify_result->cert_status)) {
+net/cert/cert_verify_proc_builtin_unittest.cc:4482:    EXPECT_FALSE(IsCertStatusError(verify_result.cert_status));
+net/cert/cert_verify_proc_builtin_unittest.cc:4530:    EXPECT_FALSE(IsCertStatusError(verify_result.cert_status));
+net/cert/cert_verify_proc_builtin_unittest.cc:4569:    EXPECT_FALSE(IsCertStatusError(verify_result.cert_status));
+net/cert/cert_verify_proc_builtin_unittest.cc:4608:    EXPECT_FALSE(IsCertStatusError(verify_result.cert_status));
+net/cert/cert_verify_proc_builtin_unittest.cc:4647:    EXPECT_FALSE(IsCertStatusError(verify_result.cert_status));
+net/cert/cert_verify_proc_builtin_unittest.cc:4692:    EXPECT_FALSE(IsCertStatusError(verify_result.cert_status));
+net/cert/cert_verify_proc_ios.cc:349:  if (IsCertStatusError(verify_result->cert_status))
+net/http/http_cache_transaction.cc:3754:  if (IsCertStatusError(response.ssl_info.cert_status) ||
+net/http/http_network_transaction.cc:1966:  if (IsCertStatusError(response_.ssl_info.cert_status))
+net/http/http_network_transaction.cc:1994:      IsCertStatusError(response_.ssl_info.cert_status)) {
+net/http/http_network_transaction.cc:2816:        !IsCertStatusError(response_.ssl_info.cert_status)) {
+net/quic/crypto/proof_verifier_chromium.cc:434:      IsCertStatusError(cert_status) &&
+net/quic/quic_event_logger.cc:774:  if (IsCertStatusError(result.cert_status)) {
+net/socket/ssl_client_socket_impl.cc:1232:      IsCertStatusError(server_cert_verify_result_.cert_status) &&
+net/spdy/spdy_session.cc:731:  if (IsCertStatusError(ssl_info.cert_status))
+net/spdy/spdy_session.cc:3226:      IsCertStatusError(ssl_info.cert_status)) {
+net/url_request/url_request_http_job.cc:1140:  if (!ssl_info.is_valid() || IsCertStatusError(ssl_info.cert_status)) {
+net/url_request/url_request_http_job.cc:1163:  if (!ssl_info.is_valid() || IsCertStatusError(ssl_info.cert_status) ||
+net/url_request/url_request_http_job_unittest.cc:2134:  EXPECT_TRUE(IsCertStatusError(request_->ssl_info().cert_status));
+services/cert_verifier/cert_verifier_service_factory_unittest.cc:1500:  EXPECT_FALSE(net::IsCertStatusError(result.cert_status));
+services/cert_verifier/cert_verifier_service_factory_unittest.cc:1541:    EXPECT_TRUE(net::IsCertStatusError(result.cert_status));
+services/cert_verifier/cert_verifier_service_factory_unittest.cc:1561:    EXPECT_FALSE(net::IsCertStatusError(result.cert_status));
+services/cert_verifier/cert_verifier_service_factory_unittest.cc:1965:  EXPECT_FALSE(net::IsCertStatusError(result.cert_status));
+services/cert_verifier/cert_verifier_service_factory_unittest.cc:2005:  EXPECT_TRUE(net::IsCertStatusError(result.cert_status));
+services/network/cors/cors_url_loader.cc:841:      !net::IsCertStatusError(response_head->cert_status)) {
+services/network/cors/preflight_controller.cc:487:        net_error == net::OK && !net::IsCertStatusError(head.cert_status)) {
+services/network/network_context_unittest.cc:8491:    ASSERT_FALSE(net::IsCertStatusError(ssl_info->cert_status));
+services/network/url_loader.cc:2058:        net::IsCertStatusError(url_request_->ssl_info().cert_status)) {
+services/network/url_loader_util.cc:776:        (net::IsCertStatusError(url_request.ssl_info().cert_status) &&
+third_party/blink/renderer/platform/exported/web_url_response.cc:114:  if (net::IsCertStatusError(head.cert_status)) {
+third_party/blink/renderer/platform/exported/web_url_response.cc:144:      net::IsCertStatusError(head.cert_status));

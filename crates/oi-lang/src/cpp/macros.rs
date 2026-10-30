@@ -12,6 +12,78 @@ pub(super) struct Blanked {
 
 /// Returns the rewritten source (or `None` if nothing changed) and the blanked invocations.
 pub(super) fn neutralize(src: &[u8]) -> (Option<Vec<u8>>, Vec<Blanked>) {
+    let (out, blanked) = neutralize_statements(src);
+    let base = out.as_deref().unwrap_or(src);
+    match blank_class_attributes(base) {
+        Some(rewritten) => (Some(rewritten), blanked),
+        None => (out, blanked),
+    }
+}
+
+/// Blanks attribute macros between a class key and the class name, e.g. `class NET_EXPORT Foo`,
+/// `struct COMPONENT_EXPORT(X) Bar`, `class MOZ_STACK_CLASS Baz`. Such a macro must be `ALL_CAPS` with
+/// an underscore and be followed by another identifier, which plain C++ never allows there.
+fn blank_class_attributes(src: &[u8]) -> Option<Vec<u8>> {
+    let mut out: Option<Vec<u8>> = None;
+    let mut pos = 0;
+    while pos < src.len() {
+        let word_len = ident_len(&src[pos..]);
+        if word_len == 0 {
+            pos += 1;
+            continue;
+        }
+        let word = &src[pos..pos + word_len];
+        let at_word_start =
+            pos == 0 || !(src[pos - 1].is_ascii_alphanumeric() || src[pos - 1] == b'_');
+        let mut cursor = pos + word_len;
+        if at_word_start && matches!(word, b"class" | b"struct" | b"union") {
+            loop {
+                let start = cursor + ws_len(&src[cursor..]);
+                let len = ident_len(&src[start..]);
+                let name = &src[start..start + len];
+                if len == 0 || !is_attribute_macro(name) {
+                    break;
+                }
+                let mut end = start + len;
+                let after = end + ws_len(&src[end..]);
+                if src.get(after) == Some(&b'(') {
+                    match matching_paren(src, after) {
+                        Some(e) => end = e,
+                        None => break,
+                    }
+                }
+                let next = end + ws_len(&src[end..]);
+                if ident_len(&src[next..]) == 0 {
+                    break; // `class FOO_BAR {` or `class FOO_BAR;`: the macro may be the name
+                }
+                let buf = out.get_or_insert_with(|| src.to_vec());
+                for b in &mut buf[start..end] {
+                    if *b != b'\n' {
+                        *b = b' ';
+                    }
+                }
+                cursor = end;
+            }
+        }
+        pos = cursor;
+    }
+    out
+}
+
+fn is_attribute_macro(name: &[u8]) -> bool {
+    name.len() > 2
+        && name[0].is_ascii_uppercase()
+        && name.contains(&b'_')
+        && name
+            .iter()
+            .all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn ws_len(s: &[u8]) -> usize {
+    s.iter().take_while(|b| b.is_ascii_whitespace()).count()
+}
+
+fn neutralize_statements(src: &[u8]) -> (Option<Vec<u8>>, Vec<Blanked>) {
     let mut out: Option<Vec<u8>> = None;
     let mut blanked = Vec::new();
     let mut line_no: u32 = 1;
@@ -190,6 +262,27 @@ mod tests {
                 ("NS_IMPL_ISUPPORTS".into(), 4)
             ]
         );
+    }
+
+    #[test]
+    fn blanks_class_attribute_macros() {
+        let src = "class NET_EXPORT Foo {};\nclass COMPONENT_EXPORT(NET) Bar\n : public X {};\nstruct MOZ_RAII MOZ_STACK_CLASS Baz;\n";
+        let (text, _) = run(src);
+        assert_eq!(text.len(), src.len());
+        let blank = |s: &str| " ".repeat(s.len());
+        assert!(text.starts_with(&format!("class {} Foo {{}};", blank("NET_EXPORT"))));
+        assert!(text.contains(&format!("class {} Bar", blank("COMPONENT_EXPORT(NET)"))));
+        assert!(text.contains(&format!(
+            "struct {} Baz;",
+            blank("MOZ_RAII MOZ_STACK_CLASS")
+        )));
+        for keep in [
+            "class FOO_BAR {};\n",
+            "class Foo_Bar Baz;\n",
+            "myclass NET_EXPORT x;\n",
+        ] {
+            assert_eq!(run(keep).0, keep);
+        }
     }
 
     #[test]

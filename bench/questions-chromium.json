@@ -1,0 +1,57 @@
+{
+  "truth_dir": "chromium-0b2cf11831",
+  "corpus": {
+    "repo": "https://chromium.googlesource.com/chromium/src.git",
+    "commit": "0b2cf1183101fbc496ad178fa42ce588347b67c3",
+    "clone": "git clone --depth 1 <repo> chromium (then verify HEAD == commit); src only, no DEPS"
+  },
+  "answer_format": "End your reply with a fenced code block tagged `answer` that contains one item per line (exactly the kind of item the question asks for) and nothing else.",
+  "questions": [
+    {
+      "id": "q1",
+      "prompt": "List every file in this repository that #includes net/http/http_response_info.h directly, with any include spelling. Search the whole tree. Answer items: repository-relative file paths.",
+      "truth": "q1-includers.txt",
+      "unit": "path",
+      "index_cmd": [
+        "includers",
+        "net/http/http_response_info.h"
+      ]
+    },
+    {
+      "id": "q2",
+      "prompt": "Where is the C++ class URLRequestJob defined (the class definition with its body, not a forward declaration)? Answer item: one path:line.",
+      "truth": "q2-def.txt",
+      "unit": "path:line",
+      "index_cmd": [
+        "def",
+        "URLRequestJob",
+        "--kind",
+        "class"
+      ]
+    },
+    {
+      "id": "q3",
+      "prompt": "Which C++ classes implement net::URLRequest::Delegate::OnResponseStarted(URLRequest* request, int net_error)? That is: classes deriving directly or indirectly from URLRequest::Delegate that declare or define OnResponseStarted with that parameter list. Exclude URLRequest::Delegate itself, and exclude classes outside that hierarchy even if they have a method with the same signature. Search the whole tree. Answer items: class names without namespaces.",
+      "truth": "q3-implementers.txt",
+      "unit": "class",
+      "index_cmd": [
+        "overrides",
+        "OnResponseStarted",
+        "--sig",
+        "(URLRequest*, int)",
+        "--base",
+        "URLRequest::Delegate"
+      ]
+    },
+    {
+      "id": "q4",
+      "prompt": "Which C/C++/Objective-C++ files call the function IsCertStatusError? Count only real calls, not declarations, definitions, comments or strings. Search the whole tree. Answer items: repository-relative file paths.",
+      "truth": "q4-caller-files.txt",
+      "unit": "path",
+      "index_cmd": [
+        "callers",
+        "IsCertStatusError"
+      ]
+    }
+  ]
+}

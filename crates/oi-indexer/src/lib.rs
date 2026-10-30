@@ -14,6 +14,10 @@ use oi_model::{FileFacts, Lang};
 use oi_store::{Store, StoreError};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 
+/// Bump whenever extraction output changes, so existing indexes re-extract every file instead of
+/// keeping facts from the old extractor for unchanged blobs.
+pub const EXTRACTOR_VERSION: &str = "4";
+
 /// Blobs larger than this are skipped; at this size C/C++ is almost always generated.
 pub const DEFAULT_MAX_FILE_BYTES: usize = 4 << 20;
 
@@ -82,6 +86,8 @@ impl Indexer {
         };
         let tree = self.repo.ls_tree(&stats.commit)?;
         stats.tree_files = tree.len();
+        // An index built by a different extractor is stale for every file, whatever its blob id.
+        let same_extractor = store.meta("extractor")?.as_deref() == Some(EXTRACTOR_VERSION);
         let indexed = store.files()?;
 
         let mut todo: Vec<(TreeEntry, Lang)> = Vec::new();
@@ -93,7 +99,7 @@ impl Indexer {
             stats.indexable += 1;
             live.insert(entry.path.as_str());
             match indexed.get(&entry.path) {
-                Some(row) if row.oid == entry.oid => stats.unchanged += 1,
+                Some(row) if same_extractor && row.oid == entry.oid => stats.unchanged += 1,
                 _ => todo.push((entry.clone(), extractor.lang())),
             }
         }
@@ -116,6 +122,7 @@ impl Indexer {
         drop(live);
         self.extract_into(todo, &mut writer, &mut stats)?;
         writer.set_meta("commit", &stats.commit)?;
+        writer.set_meta("extractor", EXTRACTOR_VERSION)?;
         writer.commit()?;
         stats.extract_time = extract_start.elapsed();
         stats.total_time = start.elapsed();
