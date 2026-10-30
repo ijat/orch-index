@@ -1,0 +1,13 @@
+[package]
+name = "oi-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+oi-model = { version = "0.1.0", path = "../oi-model" }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

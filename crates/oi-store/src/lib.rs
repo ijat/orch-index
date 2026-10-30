@@ -1,0 +1,411 @@
+//! `SQLite` persistence for extracted facts, and the lookups that queries are built on.
+//!
+//! Names are interned into `names` so the large tables (`refs` above all) hold integers only.
+//! Each file's facts are replaced wholesale when its blob id changes.
+
+mod schema;
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use oi_model::{FileFacts, Lang, Provenance, RefKind, SymbolKind};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error(
+        "index schema version {found} is not supported (expected {expected}); rebuild the index"
+    )]
+    SchemaVersion { found: i64, expected: i64 },
+}
+
+pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// An indexed file as recorded in the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRow {
+    pub id: i64,
+    pub path: String,
+    pub oid: String,
+}
+
+/// A symbol row joined with its file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolHit {
+    pub path: String,
+    pub oid: String,
+    pub line: u32,
+    pub name: String,
+    pub scope: String,
+    pub kind: SymbolKind,
+    pub is_definition: bool,
+    pub signature: String,
+    pub is_virtual: bool,
+    pub provenance: Provenance,
+}
+
+/// A reference row joined with its file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefHit {
+    pub path: String,
+    pub oid: String,
+    pub line: u32,
+    pub kind: RefKind,
+    /// Qualified name of the enclosing function, if any.
+    pub container: Option<String>,
+}
+
+/// An include directive joined with the including file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncludeHit {
+    pub path: String,
+    pub oid: String,
+    pub line: u32,
+    pub spec: String,
+}
+
+/// A base-class edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseHit {
+    pub path: String,
+    pub line: u32,
+    pub derived: String,
+    pub base: String,
+}
+
+pub struct Store {
+    conn: Connection,
+}
+
+impl Store {
+    /// Opens (creating if needed) the index at `path`.
+    pub fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        schema::init(&conn)?;
+        Ok(Self { conn })
+    }
+
+    /// An in-memory store, for tests.
+    pub fn in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        schema::init(&conn)?;
+        Ok(Self { conn })
+    }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// All indexed files, keyed by path.
+    pub fn files(&self) -> Result<HashMap<String, FileRow>> {
+        let mut stmt = self.conn.prepare("SELECT id, path, oid FROM files")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(FileRow {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                oid: r.get(2)?,
+            })
+        })?;
+        rows.map(|r| r.map(|f| (f.path.clone(), f)).map_err(Into::into))
+            .collect()
+    }
+
+    /// Starts a write batch. Nothing is visible to readers until [`Writer::commit`].
+    pub fn writer(&mut self) -> Result<Writer<'_>> {
+        let tx = self.conn.transaction()?;
+        let mut names = HashMap::new();
+        {
+            let mut stmt = tx.prepare("SELECT id, name FROM names")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(0)?)))?;
+            for row in rows {
+                let (name, id) = row?;
+                names.insert(name, id);
+            }
+        }
+        Ok(Writer { tx, names })
+    }
+
+    fn name_id(&self, name: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM names WHERE name = ?1", [name], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Symbols named `name`, optionally restricted to `kinds` and a path prefix.
+    pub fn symbols(
+        &self,
+        name: &str,
+        kinds: &[SymbolKind],
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<SymbolHit>> {
+        let Some(name_id) = self.name_id(name)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path, f.oid, s.line, s.scope, s.kind, s.is_def, s.signature, s.is_virtual, s.prov
+             FROM symbols s JOIN files f ON f.id = s.file_id
+             WHERE s.name_id = ?1 AND (?2 IS NULL OR substr(f.path, 1, length(?2)) = ?2)
+             ORDER BY f.path, s.line",
+        )?;
+        let rows = stmt.query_map(params![name_id, path_prefix], |r| {
+            Ok(SymbolHit {
+                path: r.get(0)?,
+                oid: r.get(1)?,
+                line: r.get(2)?,
+                name: name.to_owned(),
+                scope: r.get(3)?,
+                kind: SymbolKind::parse(&r.get::<_, String>(4)?).unwrap_or(SymbolKind::Variable),
+                is_definition: r.get(5)?,
+                signature: r.get(6)?,
+                is_virtual: r.get(7)?,
+                provenance: Provenance::parse(&r.get::<_, String>(8)?)
+                    .unwrap_or(Provenance::Syntactic),
+            })
+        })?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let hit = row?;
+            if kinds.is_empty() || kinds.contains(&hit.kind) {
+                hits.push(hit);
+            }
+        }
+        Ok(hits)
+    }
+
+    /// References to `name`, optionally of one kind and under a path prefix.
+    pub fn refs(
+        &self,
+        name: &str,
+        kind: Option<RefKind>,
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<RefHit>> {
+        let Some(name_id) = self.name_id(name)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path, f.oid, r.line, r.kind, c.name
+             FROM refs r JOIN files f ON f.id = r.file_id
+             LEFT JOIN names c ON c.id = r.container_id
+             WHERE r.name_id = ?1 AND (?2 IS NULL OR r.kind = ?2)
+               AND (?3 IS NULL OR substr(f.path, 1, length(?3)) = ?3)
+             ORDER BY f.path, r.line",
+        )?;
+        let kind_code = kind.map(ref_kind_code);
+        let rows = stmt.query_map(params![name_id, kind_code, path_prefix], |r| {
+            Ok(RefHit {
+                path: r.get(0)?,
+                oid: r.get(1)?,
+                line: r.get(2)?,
+                kind: ref_kind_from_code(r.get(3)?),
+                container: r.get(4)?,
+            })
+        })?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// Include directives whose spec ends in `basename` (the file name of the target).
+    pub fn includes_by_basename(&self, basename: &str) -> Result<Vec<IncludeHit>> {
+        let Some(base_id) = self.name_id(basename)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path, f.oid, i.line, i.spec
+             FROM includes i JOIN files f ON f.id = i.file_id
+             WHERE i.base_id = ?1 ORDER BY f.path, i.line",
+        )?;
+        let rows = stmt.query_map([base_id], |r| {
+            Ok(IncludeHit {
+                path: r.get(0)?,
+                oid: r.get(1)?,
+                line: r.get(2)?,
+                spec: r.get(3)?,
+            })
+        })?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// Paths of all indexed files whose file name is `basename`.
+    pub fn files_by_basename(&self, basename: &str) -> Result<Vec<String>> {
+        let Some(base_id) = self.name_id(basename)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT path FROM files WHERE base_id = ?1 ORDER BY path")?;
+        let rows = stmt.query_map([base_id], |r| r.get(0))?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// Classes that list `base` as a direct base.
+    pub fn derived_of(&self, base: &str) -> Result<Vec<BaseHit>> {
+        let Some(base_id) = self.name_id(base)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path, b.line, d.name
+             FROM bases b JOIN files f ON f.id = b.file_id JOIN names d ON d.id = b.derived_id
+             WHERE b.base_id = ?1 ORDER BY f.path, b.line",
+        )?;
+        let rows = stmt.query_map([base_id], |r| {
+            Ok(BaseHit {
+                path: r.get(0)?,
+                line: r.get(1)?,
+                derived: r.get(2)?,
+                base: base.to_owned(),
+            })
+        })?;
+        rows.map(|r| r.map_err(Into::into)).collect()
+    }
+
+    /// Row counts per table, for `stats`.
+    pub fn counts(&self) -> Result<Vec<(&'static str, i64)>> {
+        ["files", "names", "symbols", "refs", "includes", "bases"]
+            .into_iter()
+            .map(|t| {
+                let n = self
+                    .conn
+                    .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))?;
+                Ok((t, n))
+            })
+            .collect()
+    }
+}
+
+/// A write batch over one transaction, with an in-memory name-interning cache.
+pub struct Writer<'a> {
+    tx: Transaction<'a>,
+    names: HashMap<String, i64>,
+}
+
+impl Writer<'_> {
+    fn intern(&mut self, name: &str) -> Result<i64> {
+        if let Some(&id) = self.names.get(name) {
+            return Ok(id);
+        }
+        self.tx
+            .prepare_cached("INSERT INTO names (name) VALUES (?1)")?
+            .execute([name])?;
+        let id = self.tx.last_insert_rowid();
+        self.names.insert(name.to_owned(), id);
+        Ok(id)
+    }
+
+    pub fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
+        self.tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes a file and every fact extracted from it.
+    pub fn remove_file(&mut self, file_id: i64) -> Result<()> {
+        for table in ["symbols", "refs", "includes", "bases"] {
+            self.tx
+                .prepare_cached(&format!("DELETE FROM {table} WHERE file_id = ?1"))?
+                .execute([file_id])?;
+        }
+        self.tx
+            .prepare_cached("DELETE FROM files WHERE id = ?1")?
+            .execute([file_id])?;
+        Ok(())
+    }
+
+    /// Inserts a file and its facts. The path must not already be present.
+    pub fn put_file(&mut self, path: &str, oid: &str, lang: Lang, facts: &FileFacts) -> Result<()> {
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        let base_id = self.intern(basename)?;
+        self.tx
+            .prepare_cached("INSERT INTO files (path, oid, lang, base_id) VALUES (?1, ?2, ?3, ?4)")?
+            .execute(params![path, oid, lang.as_str(), base_id])?;
+        let file_id = self.tx.last_insert_rowid();
+        let prov = Provenance::Syntactic.as_str();
+
+        for s in &facts.symbols {
+            let name_id = self.intern(&s.name)?;
+            self.tx
+                .prepare_cached(
+                    "INSERT INTO symbols (file_id, name_id, line, scope, kind, is_def, signature, is_virtual, prov)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )?
+                .execute(params![
+                    file_id,
+                    name_id,
+                    s.line,
+                    s.scope,
+                    s.kind.as_str(),
+                    s.is_definition,
+                    s.signature,
+                    s.is_virtual,
+                    prov
+                ])?;
+        }
+        for r in &facts.references {
+            let name_id = self.intern(&r.name)?;
+            let container_id = match &r.container {
+                Some(c) => Some(self.intern(c)?),
+                None => None,
+            };
+            self.tx
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO refs (name_id, file_id, line, kind, container_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?
+                .execute(params![
+                    name_id,
+                    file_id,
+                    r.line,
+                    ref_kind_code(r.kind),
+                    container_id
+                ])?;
+        }
+        for i in &facts.includes {
+            let base = i.spec.rsplit('/').next().unwrap_or(&i.spec);
+            let base_id = self.intern(base)?;
+            self.tx
+                .prepare_cached(
+                    "INSERT INTO includes (file_id, line, spec, is_system, base_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?
+                .execute(params![file_id, i.line, i.spec, i.system, base_id])?;
+        }
+        for b in &facts.bases {
+            let derived_id = self.intern(&b.derived)?;
+            let base_id = self.intern(&b.base)?;
+            self.tx
+                .prepare_cached(
+                    "INSERT INTO bases (file_id, line, derived_id, base_id) VALUES (?1, ?2, ?3, ?4)",
+                )?
+                .execute(params![file_id, b.line, derived_id, base_id])?;
+        }
+        Ok(())
+    }
+
+    pub fn commit(self) -> Result<()> {
+        self.tx.commit()?;
+        Ok(())
+    }
+}
+
+const fn ref_kind_code(kind: RefKind) -> i64 {
+    match kind {
+        RefKind::Call => 0,
+        RefKind::Type => 1,
+        RefKind::Use => 2,
+    }
+}
+
+const fn ref_kind_from_code(code: i64) -> RefKind {
+    match code {
+        0 => RefKind::Call,
+        1 => RefKind::Type,
+        _ => RefKind::Use,
+    }
+}
