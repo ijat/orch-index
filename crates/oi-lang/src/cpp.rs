@@ -1,11 +1,9 @@
 //! C and C++ (and Objective-C++ on a best-effort basis) via tree-sitter-cpp.
 
-use std::cell::RefCell;
-use std::collections::HashSet;
+use oi_model::{FileFacts, Lang, RefKind, Symbol, SymbolKind};
+use tree_sitter::Node;
 
-use oi_model::{BaseClass, FileFacts, Include, Lang, RefKind, Reference, Symbol, SymbolKind};
-use tree_sitter::{Node, Parser, Tree};
-
+use crate::walk::{self, ParserSlot, State, Visit, collapse_ws, join_scope, line_of, qualify};
 use crate::{ExtractError, Extractor, SyntaxError, extension};
 
 mod macros;
@@ -18,7 +16,7 @@ const EXTENSIONS: &[&str] = &[
 const DEFAULT_VIRTUAL_MACROS: &[&str] = &["NS_IMETHOD", "NS_IMETHOD_", "STDMETHOD", "STDMETHOD_"];
 
 thread_local! {
-    static PARSER: RefCell<Option<Parser>> = const { RefCell::new(None) };
+    static PARSER: ParserSlot = const { ParserSlot::new(None) };
 }
 
 /// Extracts definitions, references, includes and base classes from C/C++ sources.
@@ -37,6 +35,10 @@ impl Default for CppExtractor {
     }
 }
 
+fn parse(source: &[u8]) -> Result<tree_sitter::Tree, ExtractError> {
+    walk::parse(&PARSER, &tree_sitter_cpp::LANGUAGE.into(), "cpp", source)
+}
+
 impl Extractor for CppExtractor {
     fn lang(&self) -> Lang {
         Lang::Cpp
@@ -49,31 +51,7 @@ impl Extractor for CppExtractor {
     fn syntax_errors(&self, source: &[u8]) -> Result<Vec<SyntaxError>, ExtractError> {
         let (rewritten, _) = macros::neutralize(source);
         let source = rewritten.as_deref().unwrap_or(source);
-        let tree = parse(source)?;
-        let mut out = Vec::new();
-        let mut stack = vec![tree.root_node()];
-        while let Some(node) = stack.pop() {
-            if node.is_error() || node.is_missing() {
-                let mut ctx = node.parent();
-                while let Some(p) = ctx.filter(Node::is_error) {
-                    ctx = p.parent();
-                }
-                let end = node.end_byte().min(node.start_byte() + 80);
-                out.push(SyntaxError {
-                    line: line_of(node),
-                    context: ctx.map_or("", |p| p.kind()).to_owned(),
-                    text: String::from_utf8_lossy(&source[node.start_byte()..end])
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                });
-                continue;
-            }
-            let mut cursor = node.walk();
-            stack.extend(node.children(&mut cursor));
-        }
-        out.sort_by_key(|e| e.line);
-        Ok(out)
+        Ok(walk::syntax_errors(&parse(source)?, source))
     }
 
     fn extract(&self, source: &[u8]) -> Result<FileFacts, ExtractError> {
@@ -81,137 +59,49 @@ impl Extractor for CppExtractor {
         let source = rewritten.as_deref().unwrap_or(source);
         let tree = parse(source)?;
         let mut walker = Walker {
-            src: source,
+            st: State::new(source),
             virtual_macros: &self.virtual_macros,
-            facts: FileFacts::default(),
-            scopes: Vec::new(),
-            functions: Vec::new(),
-            name_nodes: HashSet::new(),
-            seen_refs: HashSet::new(),
         };
-        walker.walk(tree.root_node());
+        walk::walk(&mut walker, tree.root_node());
         for b in blanked {
-            walker.push_ref(&b.name, RefKind::Use, b.line);
+            walker.st.push_ref(&b.name, RefKind::Use, b.line);
         }
-        Ok(walker.facts)
+        Ok(walker.st.facts)
     }
-}
-
-/// Parses with this thread's cached parser.
-fn parse(source: &[u8]) -> Result<Tree, ExtractError> {
-    PARSER.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            let mut parser = Parser::new();
-            parser
-                .set_language(&tree_sitter_cpp::LANGUAGE.into())
-                .map_err(|_| ExtractError::Grammar("cpp"))?;
-            *slot = Some(parser);
-        }
-        slot.as_mut()
-            .expect("parser initialized above")
-            .parse(source, None)
-            .ok_or(ExtractError::NoTree)
-    })
-}
-
-/// An open scope and the syntax node that opened it.
-struct Scope {
-    node_id: usize,
-    name: String,
 }
 
 struct Walker<'a> {
-    src: &'a [u8],
+    st: State<'a>,
     virtual_macros: &'a [String],
-    facts: FileFacts,
-    scopes: Vec<Scope>,
-    /// Enclosing function definitions, innermost last; references record the innermost.
-    functions: Vec<Scope>,
-    /// Byte offsets of identifiers that name a definition; these are not references.
-    name_nodes: HashSet<usize>,
-    /// (name, kind, line) already recorded, so a line mentioning a name twice yields one ref.
-    seen_refs: HashSet<(String, RefKind, u32)>,
 }
 
-impl<'a> Walker<'a> {
-    /// Iterative pre-order walk; deep expression trees in generated code would overflow a
-    /// recursive one.
-    fn walk(&mut self, root: Node<'a>) {
-        let mut cursor = root.walk();
-        loop {
-            let node = cursor.node();
-            self.enter(node);
-            if cursor.goto_first_child() {
-                continue;
-            }
-            loop {
-                self.leave(cursor.node());
-                if cursor.goto_next_sibling() {
-                    break;
-                }
-                if !cursor.goto_parent() {
-                    return;
-                }
-            }
-        }
-    }
-
-    fn text(&self, node: Node<'_>) -> &'a str {
-        std::str::from_utf8(&self.src[node.byte_range()]).unwrap_or("")
-    }
-
-    fn scope(&self) -> String {
-        self.scopes
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect::<Vec<_>>()
-            .join("::")
-    }
-
-    fn leave(&mut self, node: Node<'_>) {
-        if self.scopes.last().is_some_and(|s| s.node_id == node.id()) {
-            self.scopes.pop();
-        }
-        if self
-            .functions
-            .last()
-            .is_some_and(|s| s.node_id == node.id())
-        {
-            self.functions.pop();
-        }
+impl<'a> Visit<'a> for Walker<'a> {
+    fn state(&mut self) -> &mut State<'a> {
+        &mut self.st
     }
 
     fn enter(&mut self, node: Node<'a>) {
-        if node.is_error() || node.is_missing() {
-            self.facts.parse_errors += 1;
-        }
         match node.kind() {
             "preproc_include" => self.include(node),
             "preproc_def" | "preproc_function_def" => {
                 if let Some(name) = node.child_by_field_name("name") {
-                    self.symbol(
-                        name,
-                        self.text(name).to_owned(),
-                        "",
-                        SymbolKind::Macro,
-                        true,
-                    );
+                    self.st.symbol(name, "", SymbolKind::Macro);
                 }
             }
             "namespace_definition" => self.namespace(node),
             "class_specifier" | "struct_specifier" | "union_specifier" => self.record(node),
-            "enum_specifier" => self.enumeration(node),
+            "enum_specifier" => {
+                if let Some(name) = node.child_by_field_name("name")
+                    && node.child_by_field_name("body").is_some()
+                {
+                    let scope = self.st.scope();
+                    self.st.symbol(name, &scope, SymbolKind::Enum);
+                }
+            }
             "enumerator" => {
                 if let Some(name) = node.child_by_field_name("name") {
-                    let scope = self.scope();
-                    self.symbol(
-                        name,
-                        self.text(name).to_owned(),
-                        &scope,
-                        SymbolKind::Enumerator,
-                        true,
-                    );
+                    let scope = self.st.scope();
+                    self.st.symbol(name, &scope, SymbolKind::Enumerator);
                 }
             }
             "function_definition" => self.function(node, true),
@@ -219,18 +109,12 @@ impl<'a> Walker<'a> {
             "type_definition" => self.typedef(node),
             "alias_declaration" => {
                 if let Some(name) = node.child_by_field_name("name") {
-                    let scope = self.scope();
-                    self.symbol(
-                        name,
-                        self.text(name).to_owned(),
-                        &scope,
-                        SymbolKind::Typedef,
-                        true,
-                    );
+                    let scope = self.st.scope();
+                    self.st.symbol(name, &scope, SymbolKind::Typedef);
                 }
             }
             "call_expression" => self.call(node),
-            "type_identifier" => self.reference(node, RefKind::Type),
+            "type_identifier" => self.st.reference(node, RefKind::Type),
             "identifier" | "field_identifier" | "namespace_identifier" => {
                 // Inside error recovery (e.g. Objective-C in a .mm file) no call_expression is
                 // built, but `name(` is still a call.
@@ -238,42 +122,40 @@ impl<'a> Walker<'a> {
                     && node
                         .next_sibling()
                         .is_some_and(|s| matches!(s.kind(), "(" | "argument_list"));
-                self.reference(node, if called { RefKind::Call } else { RefKind::Use });
+                self.st
+                    .reference(node, if called { RefKind::Call } else { RefKind::Use });
             }
             _ => {}
         }
     }
+}
 
+impl<'a> Walker<'a> {
     fn include(&mut self, node: Node<'_>) {
         let Some(path) = node.child_by_field_name("path") else {
             return;
         };
-        let raw = self.text(path);
         let system = path.kind() == "system_lib_string";
-        let spec = raw
+        let spec = self
+            .st
+            .text(path)
             .trim_matches(|c| c == '"' || c == '<' || c == '>')
             .to_owned();
-        self.facts.includes.push(Include {
-            spec,
-            system,
-            line: line_of(node),
-        });
+        self.st.include(spec, system, line_of(node));
     }
 
     fn namespace(&mut self, node: Node<'a>) {
         // Anonymous namespaces open a scope too, so their members are not mistaken for globals.
         let name = node
             .child_by_field_name("name")
-            .map_or_else(|| "(anonymous)".to_owned(), |n| self.text(n).to_owned());
+            .map_or_else(|| "(anonymous)".to_owned(), |n| self.st.text(n).to_owned());
         if let Some(n) = node.child_by_field_name("name") {
-            let scope = self.scope();
-            self.symbol(n, name.clone(), &scope, SymbolKind::Namespace, true);
+            let scope = self.st.scope();
+            self.st
+                .symbol_named(n, name.clone(), &scope, SymbolKind::Namespace);
         }
         if let Some(body) = node.child_by_field_name("body") {
-            self.scopes.push(Scope {
-                node_id: body.id(),
-                name,
-            });
+            self.st.push_scope(body, name);
         }
     }
 
@@ -288,10 +170,10 @@ impl<'a> Walker<'a> {
             _ => SymbolKind::Union,
         };
         let body = node.child_by_field_name("body");
-        let scope = join_scope(&self.scope(), &qualifiers);
+        let scope = join_scope(&self.st.scope(), &qualifiers);
         // `class Foo;` (no body) is a forward declaration; `struct Foo x;` is a type use.
         if body.is_some() {
-            self.symbol(name_node, name.clone(), &scope, kind, true);
+            self.st.symbol_named(name_node, name.clone(), &scope, kind);
         }
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -300,50 +182,23 @@ impl<'a> Walker<'a> {
             }
         }
         if let Some(body) = body {
-            self.scopes.push(Scope {
-                node_id: body.id(),
-                name: if qualifiers.is_empty() {
-                    name
-                } else {
-                    format!("{}::{name}", qualifiers.join("::"))
-                },
-            });
+            self.st
+                .push_scope(body, join_scope(&qualifiers.join("::"), &[name]));
         }
     }
 
     fn bases(&mut self, clause: Node<'_>, derived: &str, derived_scope: &str) {
         let mut cursor = clause.walk();
         for child in clause.named_children(&mut cursor) {
-            let (qualifiers, base) = match child.kind() {
-                "type_identifier" | "qualified_identifier" | "template_type" => {
-                    self.split_name(child, false)
-                }
-                _ => continue,
-            };
-            let base_written = join_scope(&qualifiers.join("::"), std::slice::from_ref(&base));
-            self.facts.bases.push(BaseClass {
-                derived: derived.to_owned(),
-                derived_scope: derived_scope.to_owned(),
-                base,
-                base_written,
-                line: line_of(child),
-            });
-        }
-    }
-
-    fn enumeration(&mut self, node: Node<'a>) {
-        let Some(name) = node.child_by_field_name("name") else {
-            return;
-        };
-        if node.child_by_field_name("body").is_some() {
-            let scope = self.scope();
-            self.symbol(
-                name,
-                self.text(name).to_owned(),
-                &scope,
-                SymbolKind::Enum,
-                true,
-            );
+            if matches!(
+                child.kind(),
+                "type_identifier" | "qualified_identifier" | "template_type"
+            ) {
+                let (qualifiers, base) = self.split_name(child, false);
+                let written = join_scope(&qualifiers.join("::"), &[base]);
+                self.st
+                    .base(derived, derived_scope, &written, line_of(child));
+            }
         }
     }
 
@@ -354,14 +209,8 @@ impl<'a> Walker<'a> {
             .collect();
         for decl in declarators {
             if let Some(id) = innermost_name(decl) {
-                let scope = self.scope();
-                self.symbol(
-                    id,
-                    self.text(id).to_owned(),
-                    &scope,
-                    SymbolKind::Typedef,
-                    true,
-                );
+                let scope = self.st.scope();
+                self.st.symbol(id, &scope, SymbolKind::Typedef);
             }
         }
     }
@@ -386,8 +235,8 @@ impl<'a> Walker<'a> {
             if let Some(func) = find_function_declarator(decl) {
                 self.function_like(node, func, false);
             } else if let Some(id) = innermost_name(decl) {
-                let scope = self.scope();
-                self.symbol(id, self.text(id).to_owned(), &scope, member_kind, true);
+                let scope = self.st.scope();
+                self.st.symbol(id, &scope, member_kind);
             }
         }
     }
@@ -408,7 +257,6 @@ impl<'a> Walker<'a> {
         if name.is_empty() {
             return;
         }
-        let enclosing = self.scope();
         let in_class = owner.kind() == "field_declaration"
             || (owner.kind() == "function_definition"
                 && owner
@@ -424,19 +272,11 @@ impl<'a> Walker<'a> {
             .map(|p| self.signature(p))
             .unwrap_or_default();
         let is_virtual = self.is_virtual(owner, func);
-        let scope = join_scope(&enclosing, &qualifiers);
+        let scope = join_scope(&self.st.scope(), &qualifiers);
         if is_definition {
-            let qualified = if scope.is_empty() {
-                name.clone()
-            } else {
-                format!("{scope}::{name}")
-            };
-            self.functions.push(Scope {
-                node_id: owner.id(),
-                name: qualified,
-            });
+            self.st.push_function(owner, qualify(&scope, &name));
         }
-        self.facts.symbols.push(Symbol {
+        self.st.push_symbol(Symbol {
             name,
             scope,
             kind,
@@ -455,7 +295,7 @@ impl<'a> Walker<'a> {
             .children(&mut cursor)
             .any(|c| c.kind() == "virtual_specifier");
         let macro_type = owner.child_by_field_name("type").is_some_and(|t| {
-            let ty = self.text(t);
+            let ty = self.st.text(t);
             self.virtual_macros
                 .iter()
                 .any(|m| ty == m || ty.starts_with(&format!("{m}(")))
@@ -484,19 +324,19 @@ impl<'a> Walker<'a> {
         let mut cursor = param.walk();
         for child in param.children(&mut cursor) {
             if child.kind() == "type_qualifier" {
-                out.push_str(self.text(child));
+                out.push_str(self.st.text(child));
                 out.push(' ');
             }
         }
         if let Some(ty) = param.child_by_field_name("type") {
-            out.push_str(&collapse_ws(self.text(ty)));
+            out.push_str(&collapse_ws(self.st.text(ty)));
         }
         let mut decl = param.child_by_field_name("declarator");
         while let Some(d) = decl {
             match d.kind() {
                 "pointer_declarator" | "abstract_pointer_declarator" => out.push('*'),
                 "reference_declarator" | "abstract_reference_declarator" => {
-                    out.push_str(if self.text(d).starts_with("&&") {
+                    out.push_str(if self.st.text(d).starts_with("&&") {
                         "&&"
                     } else {
                         "&"
@@ -530,57 +370,11 @@ impl<'a> Walker<'a> {
             _ => None,
         };
         if let Some(target) = target {
-            let name = self.text(target);
-            if !name.is_empty() {
-                self.push_ref(name, RefKind::Call, line_of(target));
-                // The identifier itself is visited next; don't count it again as a plain use.
-                self.name_nodes.insert(target.start_byte());
-            }
+            let name = self.st.text(target);
+            self.st.push_ref(name, RefKind::Call, line_of(target));
+            // The identifier itself is visited next; don't count it again as a plain use.
+            self.st.mark_name(target);
         }
-    }
-
-    fn reference(&mut self, node: Node<'_>, kind: RefKind) {
-        if self.name_nodes.contains(&node.start_byte()) {
-            return;
-        }
-        let name = self.text(node);
-        if !name.is_empty() {
-            self.push_ref(name, kind, line_of(node));
-        }
-    }
-
-    fn push_ref(&mut self, name: &str, kind: RefKind, line: u32) {
-        if self.seen_refs.insert((name.to_owned(), kind, line)) {
-            self.facts.references.push(Reference {
-                name: name.to_owned(),
-                kind,
-                line,
-                container: self.functions.last().map(|f| f.name.clone()),
-            });
-        }
-    }
-
-    fn symbol(
-        &mut self,
-        name_node: Node<'_>,
-        name: String,
-        scope: &str,
-        kind: SymbolKind,
-        is_definition: bool,
-    ) {
-        if name.is_empty() {
-            return;
-        }
-        self.name_nodes.insert(name_node.start_byte());
-        self.facts.symbols.push(Symbol {
-            name,
-            scope: scope.to_owned(),
-            kind,
-            line: line_of(name_node),
-            is_definition,
-            signature: String::new(),
-            is_virtual: false,
-        });
     }
 
     /// Splits `a::b::Name<T>` into (`["a", "b"]`, `"Name"`). Template arguments are dropped.
@@ -595,14 +389,14 @@ impl<'a> Walker<'a> {
                         let scope_name = match scope.kind() {
                             "template_type" => scope
                                 .child_by_field_name("name")
-                                .map_or("", |s| self.text(s)),
-                            _ => self.text(scope),
+                                .map_or("", |s| self.st.text(s)),
+                            _ => self.st.text(scope),
                         };
                         if !scope_name.is_empty() {
                             qualifiers.push(scope_name.to_owned());
                         }
                         if defining {
-                            self.name_nodes.insert(scope.start_byte());
+                            self.st.mark_name(scope);
                         }
                     }
                     match n.child_by_field_name("name") {
@@ -616,30 +410,13 @@ impl<'a> Walker<'a> {
                 },
                 _ => {
                     if defining {
-                        self.name_nodes.insert(n.start_byte());
+                        self.st.mark_name(n);
                     }
-                    return (qualifiers, collapse_ws(self.text(n)));
+                    return (qualifiers, collapse_ws(self.st.text(n)));
                 }
             }
         }
     }
-}
-
-fn line_of(node: Node<'_>) -> u32 {
-    u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX)
-}
-
-fn join_scope(enclosing: &str, qualifiers: &[String]) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    if !enclosing.is_empty() {
-        parts.push(enclosing);
-    }
-    parts.extend(qualifiers.iter().map(String::as_str));
-    parts.join("::")
-}
-
-fn collapse_ws(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Unwraps pointer/reference/parenthesized declarators to reach a `function_declarator`.
@@ -648,18 +425,13 @@ fn find_function_declarator(decl: Node<'_>) -> Option<Node<'_>> {
     while let Some(d) = cur {
         match d.kind() {
             "function_declarator" => return Some(d),
-            "pointer_declarator"
-            | "reference_declarator"
-            | "parenthesized_declarator"
-            | "init_declarator" => {
-                // A pointer to function (`void (*f)()`) is a variable, not a function.
-                if d.kind() == "parenthesized_declarator" {
-                    return None;
-                }
+            "pointer_declarator" | "reference_declarator" | "init_declarator" => {
                 cur = d
                     .child_by_field_name("declarator")
                     .or_else(|| d.named_child(0));
             }
+            // Includes `parenthesized_declarator`: a pointer to function (`void (*f)()`) is a
+            // variable, not a function.
             _ => return None,
         }
     }

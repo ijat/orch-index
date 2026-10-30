@@ -51,6 +51,10 @@ impl fmt::Display for Provenance {
 #[serde(rename_all = "lowercase")]
 pub enum Lang {
     Cpp,
+    Rust,
+    JavaScript,
+    TypeScript,
+    CSharp,
 }
 
 impl Lang {
@@ -58,6 +62,10 @@ impl Lang {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Cpp => "cpp",
+            Self::Rust => "rust",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::CSharp => "csharp",
         }
     }
 }
@@ -68,6 +76,8 @@ impl Lang {
 pub enum SymbolKind {
     Namespace,
     Class,
+    /// Interface, protocol or Rust trait.
+    Interface,
     Struct,
     Union,
     Enum,
@@ -75,15 +85,18 @@ pub enum SymbolKind {
     Function,
     Method,
     Field,
+    /// C# / TypeScript property or accessor.
+    Property,
     Typedef,
     Macro,
     Variable,
 }
 
 impl SymbolKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::Namespace,
         Self::Class,
+        Self::Interface,
         Self::Struct,
         Self::Union,
         Self::Enum,
@@ -91,6 +104,7 @@ impl SymbolKind {
         Self::Function,
         Self::Method,
         Self::Field,
+        Self::Property,
         Self::Typedef,
         Self::Macro,
         Self::Variable,
@@ -101,6 +115,7 @@ impl SymbolKind {
         match self {
             Self::Namespace => "namespace",
             Self::Class => "class",
+            Self::Interface => "interface",
             Self::Struct => "struct",
             Self::Union => "union",
             Self::Enum => "enum",
@@ -108,6 +123,7 @@ impl SymbolKind {
             Self::Function => "function",
             Self::Method => "method",
             Self::Field => "field",
+            Self::Property => "property",
             Self::Typedef => "typedef",
             Self::Macro => "macro",
             Self::Variable => "variable",
@@ -122,7 +138,10 @@ impl SymbolKind {
     /// Whether this kind names a type that other classes can derive from.
     #[must_use]
     pub const fn is_record(self) -> bool {
-        matches!(self, Self::Class | Self::Struct | Self::Union)
+        matches!(
+            self,
+            Self::Class | Self::Interface | Self::Struct | Self::Union | Self::Enum
+        )
     }
 }
 
@@ -187,14 +206,41 @@ pub struct Reference {
     pub container: Option<String>,
 }
 
-/// An `#include` (or, later, an import) directive.
+/// An `#include` or import directive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Include {
-    /// The path as written, without quotes or angle brackets.
+    /// The path or module as written, without quotes or angle brackets.
     pub spec: String,
     /// `#include <...>` rather than `#include "..."`.
     pub system: bool,
+    /// The spec names a module or namespace (`crate::a::B`, `System.Linq`, `react`), not a file.
+    pub module: bool,
     pub line: u32,
+}
+
+impl Include {
+    /// Lookup key: the file stem for file specs (`a/b/c.h` → `c`), the last segment for modules
+    /// (`crate::a::B` → `B`, `System.Linq` → `Linq`, `@scope/pkg` → `pkg`).
+    #[must_use]
+    pub fn key(&self) -> &str {
+        key_of(&self.spec, self.module)
+    }
+}
+
+/// See [`Include::key`]. Also used for the target side of a lookup.
+#[must_use]
+pub fn key_of(spec: &str, module: bool) -> &str {
+    if module {
+        spec.rsplit(['/', '.', ':'])
+            .find(|s| !s.is_empty())
+            .unwrap_or(spec)
+    } else {
+        let file = spec.rsplit('/').next().unwrap_or(spec);
+        match file.split_once('.') {
+            Some((stem, _)) if !stem.is_empty() => stem,
+            _ => file,
+        }
+    }
 }
 
 /// A base-class edge: `class derived : base`.
@@ -218,8 +264,11 @@ pub struct FileFacts {
     pub references: Vec<Reference>,
     pub includes: Vec<Include>,
     pub bases: Vec<BaseClass>,
-    /// Syntax-error nodes in the parse; non-zero means some facts here may be mis-scoped.
+    /// Syntax-error nodes in the parse.
     pub parse_errors: u32,
+    /// Errors at file, namespace or class level (not inside a function body). These can
+    /// mis-scope or hide later definitions, so facts from such files deserve a check.
+    pub structural_errors: u32,
 }
 
 #[cfg(test)]

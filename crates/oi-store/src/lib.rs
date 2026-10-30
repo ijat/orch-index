@@ -44,6 +44,8 @@ pub struct SymbolHit {
     pub signature: String,
     pub is_virtual: bool,
     pub provenance: Provenance,
+    /// The file had declaration-level syntax errors; facts from it may be incomplete.
+    pub file_damaged: bool,
 }
 
 /// A reference row joined with its file.
@@ -55,6 +57,7 @@ pub struct RefHit {
     pub kind: RefKind,
     /// Qualified name of the enclosing function, if any.
     pub container: Option<String>,
+    pub file_damaged: bool,
 }
 
 /// An include directive joined with the including file.
@@ -64,6 +67,7 @@ pub struct IncludeHit {
     pub oid: String,
     pub line: u32,
     pub spec: String,
+    pub file_damaged: bool,
 }
 
 /// A base-class edge.
@@ -150,7 +154,8 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(
-            "SELECT f.path, f.oid, s.line, s.scope, s.kind, s.is_def, s.signature, s.is_virtual, s.prov
+            "SELECT f.path, f.oid, s.line, s.scope, s.kind, s.is_def, s.signature, s.is_virtual, s.prov,
+                    f.structural > 0
              FROM symbols s JOIN files f ON f.id = s.file_id
              WHERE s.name_id = ?1 AND (?2 IS NULL OR substr(f.path, 1, length(?2)) = ?2)
              ORDER BY f.path, s.line",
@@ -168,6 +173,7 @@ impl Store {
                 is_virtual: r.get(7)?,
                 provenance: Provenance::parse(&r.get::<_, String>(8)?)
                     .unwrap_or(Provenance::Syntactic),
+                file_damaged: r.get(9)?,
             })
         })?;
         let mut hits = Vec::new();
@@ -191,7 +197,7 @@ impl Store {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(
-            "SELECT f.path, f.oid, r.line, r.kind, c.name
+            "SELECT f.path, f.oid, r.line, r.kind, c.name, f.structural > 0
              FROM refs r JOIN files f ON f.id = r.file_id
              LEFT JOIN names c ON c.id = r.container_id
              WHERE r.name_id = ?1 AND (?2 IS NULL OR r.kind = ?2)
@@ -206,27 +212,30 @@ impl Store {
                 line: r.get(2)?,
                 kind: ref_kind_from_code(r.get(3)?),
                 container: r.get(4)?,
+                file_damaged: r.get(5)?,
             })
         })?;
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
-    /// Include directives whose spec ends in `basename` (the file name of the target).
-    pub fn includes_by_basename(&self, basename: &str) -> Result<Vec<IncludeHit>> {
-        let Some(base_id) = self.name_id(basename)? else {
+    /// Include/import directives with lookup key `key` (see [`oi_model::Include::key`]), either
+    /// module imports or file includes.
+    pub fn includes_by_key(&self, key: &str, module: bool) -> Result<Vec<IncludeHit>> {
+        let Some(base_id) = self.name_id(key)? else {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(
-            "SELECT f.path, f.oid, i.line, i.spec
+            "SELECT f.path, f.oid, i.line, i.spec, f.structural > 0
              FROM includes i JOIN files f ON f.id = i.file_id
-             WHERE i.base_id = ?1 ORDER BY f.path, i.line",
+             WHERE i.base_id = ?1 AND i.is_module = ?2 ORDER BY f.path, i.line",
         )?;
-        let rows = stmt.query_map([base_id], |r| {
+        let rows = stmt.query_map(params![base_id, module], |r| {
             Ok(IncludeHit {
                 path: r.get(0)?,
                 oid: r.get(1)?,
                 line: r.get(2)?,
                 spec: r.get(3)?,
+                file_damaged: r.get(4)?,
             })
         })?;
         rows.map(|r| r.map_err(Into::into)).collect()
@@ -266,13 +275,14 @@ impl Store {
         rows.map(|r| r.map_err(Into::into)).collect()
     }
 
-    /// Number of indexed files whose parse had syntax errors.
-    pub fn files_with_errors(&self) -> Result<i64> {
-        Ok(self
-            .conn
-            .query_row("SELECT count(*) FROM files WHERE errors > 0", [], |r| {
-                r.get(0)
-            })?)
+    /// Indexed files whose parse had syntax errors: (any, declaration-level).
+    pub fn files_with_errors(&self) -> Result<(i64, i64)> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FILTER (WHERE errors > 0), count(*) FILTER (WHERE structural > 0)
+             FROM files",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     /// Row counts per table, for `stats`.
@@ -336,13 +346,14 @@ impl Writer<'_> {
         let base_id = self.intern(basename)?;
         self.tx
             .prepare_cached(
-                "INSERT INTO files (path, oid, lang, errors, base_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO files (path, oid, lang, errors, structural, base_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?
             .execute(params![
                 path,
                 oid,
                 lang.as_str(),
                 facts.parse_errors,
+                facts.structural_errors,
                 base_id
             ])?;
         let file_id = self.tx.last_insert_rowid();
@@ -387,14 +398,15 @@ impl Writer<'_> {
                 ])?;
         }
         for i in &facts.includes {
-            let base = i.spec.rsplit('/').next().unwrap_or(&i.spec);
-            let base_id = self.intern(base)?;
+            let base_id = self.intern(i.key())?;
             self.tx
                 .prepare_cached(
-                    "INSERT INTO includes (file_id, line, spec, is_system, base_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO includes (file_id, line, spec, is_system, is_module, base_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )?
-                .execute(params![file_id, i.line, i.spec, i.system, base_id])?;
+                .execute(params![
+                    file_id, i.line, i.spec, i.system, i.module, base_id
+                ])?;
         }
         for b in &facts.bases {
             let derived_id = self.intern(&b.derived)?;

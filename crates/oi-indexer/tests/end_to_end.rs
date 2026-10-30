@@ -141,3 +141,80 @@ fn index_query_and_update() {
     let inc = engine.includers("net/Channel.h", Some("dom/")).unwrap();
     assert_eq!(inc[0].note.as_deref(), Some("basename"));
 }
+
+#[test]
+fn languages_imports_and_damage_labels() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    git(d, &["init", "-q"]);
+    write(d, "web/src/util.ts", "export function log(x: string) {}\n");
+    write(d, "web/src/widgets/index.ts", "export class Widget {}\n");
+    write(
+        d,
+        "web/src/app.tsx",
+        "import { log } from './util';\nimport { Widget } from './widgets';\nimport React from 'react';\nexport function App() { log('x'); return <div/>; }\n",
+    );
+    write(d, "web/other/util.ts", "export const z = 1;\n");
+    write(d, "web/other/main.ts", "import { z } from './util';\n");
+    write(
+        d,
+        "core/src/lib.rs",
+        "use crate::store::Store;\npub trait Sink { fn put(&self); }\nimpl Sink for Store { fn put(&self) {} }\n",
+    );
+    write(
+        d,
+        "svc/Svc.cs",
+        "using System.Linq;\nnamespace Svc { class Job : IRunnable { public void Run() {} } }\n",
+    );
+    // A declaration-level syntax error before a definition: hits from this file get labelled.
+    write(
+        d,
+        "bad/broken.cc",
+        "class Broken {\n  int x\n  int y;\n};\n}}}\nvoid Later() {}\n",
+    );
+    write(d, "bad/clean.cc", "void Later2() {}\n");
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-q", "-m", "one"]);
+
+    let repo = Repo::new(d);
+    let mut store = Store::in_memory().unwrap();
+    let stats = Indexer::new(repo.clone())
+        .update(&mut store, "HEAD")
+        .unwrap();
+    assert_eq!((stats.indexable, stats.extracted), (9, 9));
+    let engine = Engine::new(&store, &repo);
+
+    let inc = engine.includers("web/src/util.ts", None).unwrap();
+    let got: Vec<_> = inc
+        .iter()
+        .map(|h| (h.path.as_str(), h.provenance))
+        .collect();
+    assert_eq!(got, [("web/src/app.tsx", Provenance::Resolved)]);
+    let inc = engine.includers("web/src/widgets/index.ts", None).unwrap();
+    assert_eq!(inc.len(), 1, "{inc:#?}");
+
+    let imp = engine.importers("react", None).unwrap();
+    assert_eq!(imp[0].path, "web/src/app.tsx");
+    assert_eq!(
+        engine.importers("store::Store", None).unwrap()[0].path,
+        "core/src/lib.rs"
+    );
+    assert_eq!(
+        engine.importers("System.Linq", None).unwrap()[0].path,
+        "svc/Svc.cs"
+    );
+    assert!(engine.importers("Store::store", None).unwrap().is_empty());
+
+    let over = engine.overrides("put", Some("Sink"), None, None).unwrap();
+    assert_eq!(over.len(), 1);
+    assert_eq!(over[0].detail, "Store (&self)");
+    assert_eq!(
+        engine.def("Job", &[SymbolKind::Class], None).unwrap()[0].detail,
+        "class Svc"
+    );
+
+    let later = engine.def("Later", &[], None).unwrap();
+    assert_eq!(later[0].note.as_deref(), Some("parse-errors"), "{later:#?}");
+    let clean = engine.def("Later2", &[], None).unwrap();
+    assert_eq!(clean[0].note, None);
+}

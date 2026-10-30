@@ -16,7 +16,7 @@ use rayon::iter::{ParallelBridge, ParallelIterator};
 
 /// Bump whenever extraction output changes, so existing indexes re-extract every file instead of
 /// keeping facts from the old extractor for unchanged blobs.
-pub const EXTRACTOR_VERSION: &str = "4";
+pub const EXTRACTOR_VERSION: &str = "5";
 
 /// Blobs larger than this are skipped; at this size C/C++ is almost always generated.
 pub const DEFAULT_MAX_FILE_BYTES: usize = 4 << 20;
@@ -163,7 +163,7 @@ impl Indexer {
                         } else {
                             registry
                                 .for_path(&entry.path)
-                                .and_then(|x| x.extract(&bytes).ok())
+                                .and_then(|x| x.extract_path(&entry.path, &bytes).ok())
                         };
                         let _ = tx.send(Extracted {
                             entry,

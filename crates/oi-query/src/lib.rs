@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use oi_git::{GitError, Repo};
-use oi_model::{Provenance, RefKind, SymbolKind};
+use oi_model::{Provenance, RefKind, SymbolKind, key_of};
 use oi_store::{Store, StoreError, SymbolHit};
 use serde::Serialize;
 
@@ -96,58 +96,78 @@ impl<'a> Engine<'a> {
                     Some(c) => format!("{} in {c}", r.kind.as_str()),
                     None => r.kind.as_str().to_owned(),
                 },
-                note: None,
+                note: damaged_note(r.file_damaged),
                 snippet: None,
                 oid: r.oid,
             })
             .collect())
     }
 
-    /// Files that `#include` the file at `target` (a repository path).
+    /// Files that include or import the file at `target` (a repository path).
     ///
-    /// `resolved`: the include spec matches `target` and no other indexed file.
+    /// `resolved`: the spec names `target` relative to the including file, or as a path suffix
+    /// that no other indexed file has.
     /// `syntactic` + `ambiguous:N`: the spec matches `target` and N-1 other files.
     /// `syntactic` + `basename`: the spec matches no indexed path (typically a build-system export
     /// path such as `mozilla/net/X.h`); only the file name agrees.
     pub fn includers(&self, target: &str, path: Option<&str>) -> Result<Vec<Hit>> {
         let basename = target.rsplit('/').next().unwrap_or(target);
         let same_name = self.store.files_by_basename(basename)?;
+        let mut keys = vec![key_of(target, false).to_owned()];
+        // `import "./widgets"` resolves to `widgets/index.ts`: look it up by directory name too.
+        if keys[0] == "index"
+            && let Some(dir) = target.rsplit('/').nth(1)
+        {
+            keys.push(dir.to_owned());
+        }
         let mut out = Vec::new();
-        for inc in self.store.includes_by_basename(basename)? {
+        for key in &keys {
+            for inc in self.store.includes_by_key(key, false)? {
+                if path.is_some_and(|p| !inc.path.starts_with(p)) {
+                    continue;
+                }
+                let Some((provenance, note)) =
+                    classify_include(&inc.path, &inc.spec, target, &same_name)
+                else {
+                    continue;
+                };
+                out.push(Hit {
+                    path: inc.path,
+                    line: inc.line,
+                    provenance,
+                    detail: format!("#include {}", inc.spec),
+                    note: join_note(note, damaged_note(inc.file_damaged)),
+                    snippet: None,
+                    oid: inc.oid,
+                });
+            }
+        }
+        out.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        out.dedup_by(|a, b| a.path == b.path && a.line == b.line);
+        Ok(out)
+    }
+
+    /// Files importing module or namespace `module` (`crate::store::Store`, `System.Linq`,
+    /// `react`), matched by trailing path segments. Syntactic: re-exports are not followed.
+    pub fn importers(&self, module: &str, path: Option<&str>) -> Result<Vec<Hit>> {
+        let wanted = segments(module);
+        let Some(key) = wanted.last() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for inc in self.store.includes_by_key(key, true)? {
             if path.is_some_and(|p| !inc.path.starts_with(p)) {
                 continue;
             }
-            let relative = relative_target(&inc.path, &inc.spec);
-            let (provenance, note) = if relative.as_deref() == Some(target) {
-                (Provenance::Resolved, None)
-            } else {
-                let candidates: Vec<&String> = same_name
-                    .iter()
-                    .filter(|p| path_ends_with(p, &inc.spec))
-                    .collect();
-                if candidates.iter().any(|p| *p == target) {
-                    if candidates.len() == 1 {
-                        (Provenance::Resolved, None)
-                    } else {
-                        (
-                            Provenance::Syntactic,
-                            Some(format!("ambiguous:{}", candidates.len())),
-                        )
-                    }
-                } else if candidates.is_empty()
-                    && relative.as_ref().is_none_or(|r| !same_name.contains(r))
-                {
-                    (Provenance::Syntactic, Some("basename".to_owned()))
-                } else {
-                    continue; // the spec names a different file
-                }
-            };
+            if !segments(&inc.spec).ends_with(&wanted) {
+                continue;
+            }
             out.push(Hit {
                 path: inc.path,
                 line: inc.line,
-                provenance,
-                detail: format!("#include {}", inc.spec),
-                note,
+                provenance: Provenance::Syntactic,
+                detail: format!("import {}", inc.spec),
+                note: damaged_note(inc.file_damaged),
                 snippet: None,
                 oid: inc.oid,
             });
@@ -201,11 +221,15 @@ impl<'a> Engine<'a> {
                 let mut hit = symbol_hit(first);
                 hit.detail = format!("{} {}", first.scope, first.signature);
                 let defs = rows.iter().filter(|s| s.is_definition).count();
-                hit.note = Some(match (first.is_definition, defs) {
-                    (true, _) => "defined".to_owned(),
-                    (false, 0) => "declared".to_owned(),
-                    (false, _) => "declared+defined".to_owned(),
-                });
+                let status = match (first.is_definition, defs) {
+                    (true, _) => "defined",
+                    (false, 0) => "declared",
+                    (false, _) => "declared+defined",
+                };
+                hit.note = join_note(
+                    Some(status.to_owned()),
+                    damaged_note(rows.iter().any(|s| s.file_damaged)),
+                );
                 Some(hit)
             })
             .collect())
@@ -289,9 +313,22 @@ fn symbol_hit(s: &SymbolHit) -> Hit {
         } else {
             format!("{what} {}", s.scope)
         },
-        note: None,
+        note: damaged_note(s.file_damaged),
         snippet: None,
         oid: s.oid.clone(),
+    }
+}
+
+/// Note for hits from files with declaration-level syntax errors.
+fn damaged_note(damaged: bool) -> Option<String> {
+    damaged.then(|| "parse-errors".to_owned())
+}
+
+/// Joins two optional notes as `a+b`.
+fn join_note(note: Option<String>, extra: Option<String>) -> Option<String> {
+    match (note, extra) {
+        (Some(a), Some(b)) => Some(format!("{a}+{b}")),
+        (a, b) => a.or(b),
     }
 }
 
@@ -336,6 +373,71 @@ fn split_qualified(name: &str) -> (Option<&str>, &str) {
 /// Whether `scope` ends with the `::`-separated `suffix`.
 fn scope_matches(scope: &str, suffix: &str) -> bool {
     scope == suffix || scope.ends_with(&format!("::{suffix}"))
+}
+
+/// Extensions a bare JS/TS import path may omit.
+const SCRIPT_EXTENSIONS: &[&str] = &["ts", "tsx", "d.ts", "js", "jsx", "mjs", "cjs", "mts", "cts"];
+
+/// How a file include `spec` written in `includer` relates to `target`; `None` if it names
+/// some other file.
+fn classify_include(
+    includer: &str,
+    spec: &str,
+    target: &str,
+    same_name: &[String],
+) -> Option<(Provenance, Option<String>)> {
+    let relative = relative_target(includer, spec);
+    if relative.as_deref().is_some_and(|r| names_file(r, target)) {
+        return Some((Provenance::Resolved, None));
+    }
+    // An explicitly relative spec that doesn't resolve to the target names another file.
+    if spec.starts_with("./") || spec.starts_with("../") {
+        return None;
+    }
+    let candidates: Vec<&String> = same_name
+        .iter()
+        .filter(|p| path_ends_with(p, spec))
+        .collect();
+    if candidates.iter().any(|p| *p == target) {
+        return Some(if candidates.len() == 1 {
+            (Provenance::Resolved, None)
+        } else {
+            (
+                Provenance::Syntactic,
+                Some(format!("ambiguous:{}", candidates.len())),
+            )
+        });
+    }
+    let spec_file = spec.rsplit('/').next().unwrap_or(spec);
+    let target_file = target.rsplit('/').next().unwrap_or(target);
+    let same_file_name = spec_file == target_file;
+    if same_file_name
+        && candidates.is_empty()
+        && relative.as_ref().is_none_or(|r| !same_name.contains(r))
+    {
+        return Some((Provenance::Syntactic, Some("basename".to_owned())));
+    }
+    None
+}
+
+/// Whether the resolved path `resolved` (possibly extension-less) names `target`.
+fn names_file(resolved: &str, target: &str) -> bool {
+    if resolved == target {
+        return true;
+    }
+    let Some(rest) = target.strip_prefix(resolved) else {
+        return false;
+    };
+    let ext_of = |s: &str| {
+        s.strip_prefix('.')
+            .is_some_and(|e| SCRIPT_EXTENSIONS.contains(&e))
+    };
+    ext_of(rest) || rest.strip_prefix("/index").is_some_and(ext_of)
+}
+
+/// `a::b.c/d` → `["a", "b", "c", "d"]`.
+fn segments(s: &str) -> Vec<&str> {
+    s.split([':', '.', '/']).filter(|p| !p.is_empty()).collect()
 }
 
 fn path_ends_with(path: &str, spec: &str) -> bool {
@@ -401,6 +503,33 @@ fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_imports_resolve_without_extension() {
+        assert!(names_file("src/a/b", "src/a/b.ts"));
+        assert!(names_file("src/a/b", "src/a/b/index.tsx"));
+        assert!(names_file("src/a/b", "src/a/b.d.ts"));
+        assert!(!names_file("src/a/b", "src/a/bc.ts"));
+        assert!(!names_file("src/a/b", "src/a/b.rs"));
+        let same = vec!["src/x/foo.ts".to_owned()];
+        assert_eq!(
+            classify_include("src/x/main.ts", "./foo", "src/x/foo.ts", &same),
+            Some((Provenance::Resolved, None))
+        );
+        assert_eq!(
+            classify_include("src/y/main.ts", "./foo", "src/x/foo.ts", &same),
+            None
+        );
+        // `foo.hpp` is not `foo.h`, even though the stems agree.
+        assert_eq!(classify_include("a.cc", "foo.hpp", "lib/foo.h", &[]), None);
+    }
+
+    #[test]
+    fn module_segments() {
+        assert!(segments("crate::store::Store").ends_with(&segments("store::Store")));
+        assert!(segments("System.Linq").ends_with(&segments("Linq")));
+        assert!(!segments("System.Linq").ends_with(&segments("inq")));
+    }
 
     #[test]
     fn relative_paths() {

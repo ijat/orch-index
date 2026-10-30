@@ -99,6 +99,12 @@ enum Command {
         #[command(flatten)]
         out: Output,
     },
+    /// Files importing a module or namespace (Rust `use`, C# `using`, JS/TS packages).
+    Importers {
+        module: String,
+        #[command(flatten)]
+        out: Output,
+    },
     /// Classes declaring or defining a method, one row per class.
     Overrides {
         method: String,
@@ -142,11 +148,11 @@ fn run() -> Result<()> {
         let source = std::fs::read(file)?;
         let mut stdout = io::stdout().lock();
         if *errors {
-            for e in extractor.syntax_errors(&source)? {
+            for e in extractor.syntax_errors_path(&path, &source)? {
                 writeln!(stdout, "{}", serde_json::to_string(&e)?)?;
             }
         } else {
-            for s in &extractor.extract(&source)?.symbols {
+            for s in &extractor.extract_path(&path, &source)?.symbols {
                 writeln!(stdout, "{}", serde_json::to_string(s)?)?;
             }
         }
@@ -186,9 +192,10 @@ fn run() -> Result<()> {
             for (table, n) in store.counts()? {
                 println!("{table:9} {n}");
             }
+            let (any, structural) = store.files_with_errors()?;
             println!(
-                "errors    {} files parsed with syntax errors",
-                store.files_with_errors()?
+                "errors    {any} files with syntax errors, {structural} at declaration level \
+                 (their hits are labelled parse-errors)"
             );
             if let Ok(meta) = std::fs::metadata(&db) {
                 println!("db       {:.1} MB  {}", mb(meta.len()), db.display());
@@ -224,6 +231,16 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
         Command::Includers { file, out } => {
             let hits = engine.includers(&file, out.path.as_deref())?;
             print_hits(&engine, &format!("includers of {file}"), hits, &out, false)?;
+        }
+        Command::Importers { module, out } => {
+            let hits = engine.importers(&module, out.path.as_deref())?;
+            print_hits(
+                &engine,
+                &format!("importers of {module}"),
+                hits,
+                &out,
+                false,
+            )?;
         }
         Command::Overrides {
             method,
