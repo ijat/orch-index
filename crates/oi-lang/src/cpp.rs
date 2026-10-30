@@ -55,7 +55,7 @@ impl Extractor for CppExtractor {
         while let Some(node) = stack.pop() {
             if node.is_error() || node.is_missing() {
                 let mut ctx = node.parent();
-                while let Some(p) = ctx.filter(|p| p.is_error()) {
+                while let Some(p) = ctx.filter(Node::is_error) {
                     ctx = p.parent();
                 }
                 let end = node.end_byte().min(node.start_byte() + 80);

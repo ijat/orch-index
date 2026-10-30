@@ -1,27 +1,59 @@
 # orch-index
 
-A general code indexer that makes very large repositories (Chromium scale) queryable by orch agents.
-**Not started.** This folder holds the proposal until the work begins.
+A code index that makes very large git repositories (Chromium scale) queryable by agents: where a
+symbol is defined, who calls or includes it, which classes implement a method. Answers are compact
+`path:line` rows, and each one carries a trust label.
 
-## Why
+Status: C/C++ via tree-sitter. Rust, JS/TS and C# are next (see `docs/PLAN.md`).
 
-The Firefox benchmark (2026-10-30, 486K files; results in `~/.claude/benchmarks/bigrepo-2026-10-30/RESULTS.md`)
-found:
+## Build
 
-- Haiku with scoped grep answers exact-text and simple semantic questions correctly at Firefox scale.
-  It breaks down with scale: whole-tree searches take about 10 s and return about 100 KB.
-- Heuristic indexes (ctags) are not trusted: they missed 9 of 45 definitions and treated overloads
-  as overrides. In the benchmark, Haiku spent *more* tokens with the index, because it had to verify it.
-- A flat tags file does not scale (3.3 GB, 12 s per lookup). The same data in SQLite answers a lookup
-  in 0.08 s, and re-indexing 200 changed files takes 0.9 s.
-- Compiler-accurate indexers at this scale all need a build: Kythe (Chromium code search), Searchfox's
-  Clang plugin (Firefox), scip-clang (needs `compile_commands.json`).
+```sh
+cargo build --release          # toolchain pinned in rust-toolchain.toml
+```
 
-## Proposed shape
+## Use
 
-- Rust.
-- tree-sitter as the baseline for every language, with no build needed.
-- SCIP ingestion for precise data where a compiler index exists.
-- Sharded SQLite storage.
-- Incremental updates keyed on git SHAs.
-- A query CLI with compact `file:line` output, called by an `orch-graph` (Haiku) agent.
+```sh
+orch-index index                       # build, or update incrementally to HEAD (re-extracts changed blobs only)
+orch-index def nsHttpChannel --kind class
+orch-index callers NS_GetFinalChannelURI
+orch-index includers netwerk/protocol/http/nsHttpChannel.h
+orch-index overrides OnStartRequest --sig "(nsIRequest*)" --path netwerk/
+orch-index refs nsIRequest --kind type --path dom/
+orch-index stats
+```
+
+Common flags: `--path PREFIX`, `--limit N` (default 30; the rest is summarized per directory),
+`--json`, `--no-snippet`, `--repo DIR`, `--db FILE` (default `<git-common-dir>/orch-index/index.db`).
+
+Sources are read from the git object store, so the index covers the whole committed tree even in a
+sparse worktree, and every hit's source line comes from the indexed blob.
+
+## Trust labels
+
+| Label | Meaning |
+|---|---|
+| `resolved` | Exact: e.g. an include spec that names this file and no other. |
+| `syntactic` | Parsed from source; names are not type-resolved. |
+| `syntactic:ambiguous:N` | The include spec matches N files, this one among them. |
+| `syntactic:basename` | Only the file name matches (typically a build-system export path). |
+| `compiler` | Reserved for compiler-backed data (SCIP, Kythe). |
+
+## Layout
+
+| Crate | Role |
+|---|---|
+| `oi-model` | Fact types and provenance. |
+| `oi-git` | Tree listing and blob streaming from git. |
+| `oi-lang` | `Extractor` trait; tree-sitter C/C++ extractor. |
+| `oi-store` | SQLite schema and lookups. |
+| `oi-indexer` | Incremental pipeline (blob-id keyed, parallel extraction). |
+| `oi-query` | Questions, confidence classification, snippets. |
+| `cli` | The `orch-index` binary. |
+
+## Benchmarks
+
+`bench/` holds the questions, the independently built ground truth, the Haiku A/B harness
+(`haiku_ab.py`) and the timing script (`index_timing.sh`). Results: `docs/PLAN.md` log and
+`bench/RESULTS.md`.

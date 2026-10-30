@@ -1,0 +1,34 @@
+{
+  "corpus": {
+    "repo": "https://github.com/mozilla-firefox/firefox.git",
+    "commit": "0b6146da78e50813404df3e74fe0dc29257252bc",
+    "clone": "git clone --depth 1 <repo> firefox (then verify HEAD == commit)"
+  },
+  "answer_format": "End your reply with a fenced code block tagged `answer` that contains one item per line (exactly the kind of item the question asks for) and nothing else.",
+  "questions": [
+    {
+      "id": "q1",
+      "prompt": "List every file in this repository that #includes netwerk/protocol/http/nsHttpChannel.h directly, with any include spelling. Search the whole tree. Answer items: repository-relative file paths.",
+      "truth": "q1-includers.txt",
+      "unit": "path"
+    },
+    {
+      "id": "q2",
+      "prompt": "Where is the C++ class nsHttpChannel defined (the class definition with its body, not a forward declaration)? Answer item: one path:line.",
+      "truth": "q2-def.txt",
+      "unit": "path:line"
+    },
+    {
+      "id": "q3",
+      "prompt": "Under netwerk/, which C++ classes declare or define the method OnStartRequest(nsIRequest*)? Exclude overloads with other parameter types. Answer items: class names without namespaces.",
+      "truth": "q3-implementers.txt",
+      "unit": "class"
+    },
+    {
+      "id": "q4",
+      "prompt": "Which C/C++ files call the function NS_GetFinalChannelURI? Count only real calls, not declarations, definitions, comments or strings. Search the whole tree. Answer items: repository-relative file paths.",
+      "truth": "q4-caller-files.txt",
+      "unit": "path"
+    }
+  ]
+}
