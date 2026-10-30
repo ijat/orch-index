@@ -5,7 +5,7 @@
 //! functions, properties and fields are members; `using` directives are module imports.
 
 use oi_model::{FileFacts, Lang, RefKind, Symbol, SymbolKind};
-use tree_sitter::Node;
+use tree_sitter::{Node, TreeCursor};
 
 use crate::walk::{self, ParserSlot, State, Visit, collapse_ws, line_of, qualify};
 use crate::{ExtractError, Extractor, SyntaxError, extension};
@@ -59,16 +59,13 @@ impl<'a> Visit<'a> for Walker<'a> {
         &mut self.st
     }
 
-    fn enter(&mut self, node: Node<'a>) {
+    fn enter(&mut self, node: Node<'a>, _cursor: &TreeCursor<'a>) {
         match node.kind() {
             "using_directive" => self.using(node),
             "namespace_declaration" => self.namespace(node, node.child_by_field_name("body")),
             // A file-scoped namespace covers the rest of the file: close it with the root.
             "file_scoped_namespace_declaration" => {
-                let mut root = node;
-                while let Some(p) = root.parent() {
-                    root = p;
-                }
+                let root = self.st.ancestors().last().unwrap_or(node);
                 self.namespace(node, Some(root));
             }
             "class_declaration" | "record_declaration" => self.record(node, SymbolKind::Class),
@@ -213,9 +210,10 @@ impl<'a> Walker<'a> {
             .filter(|c| c.kind() == "modifier")
             .map(|c| self.st.text(c))
             .collect();
-        let in_interface = node
-            .parent()
-            .and_then(|b| b.parent())
+        // `node` is being entered: its grandparent is the type declaration.
+        let in_interface = self
+            .st
+            .ancestor(2)
             .is_some_and(|p| p.kind() == "interface_declaration");
         let is_virtual = in_interface
             || modifiers

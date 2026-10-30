@@ -1,7 +1,7 @@
 //! Reads a repository from the git object store, so indexing works in sparse worktrees and
 //! never depends on what happens to be checked out.
 
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -23,6 +23,25 @@ pub struct TreeEntry {
     pub path: String,
     /// Hex object id of the blob; changes exactly when the content changes.
     pub oid: String,
+    /// Blob size in bytes.
+    pub size: u64,
+}
+
+/// The blobs of a tree, plus what had to be left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tree {
+    pub entries: Vec<TreeEntry>,
+    /// Paths that are not valid UTF-8, skipped.
+    pub skipped_non_utf8: usize,
+}
+
+/// Result of reading one blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Blob {
+    Data(Vec<u8>),
+    /// Larger than the caller's limit; the content was discarded unread.
+    TooLarge(u64),
+    Missing,
 }
 
 /// A git repository addressed by its working directory or `.git` directory.
@@ -72,39 +91,37 @@ impl Repo {
         Ok(PathBuf::from(String::from_utf8_lossy(&out).trim()))
     }
 
-    /// Lists every blob reachable from `rev`, recursively. Symlinks and submodules are skipped.
-    pub fn ls_tree(&self, rev: &str) -> Result<Vec<TreeEntry>> {
-        let out = self.run(&["ls-tree", "-r", "-z", "--full-tree", rev])?;
-        let mut entries = Vec::new();
+    /// Lists every blob reachable from `rev`, recursively, with sizes. Symlinks and submodules
+    /// are skipped, and so are paths that are not valid UTF-8 (counted in
+    /// [`Tree::skipped_non_utf8`]): lossy decoding would make distinct paths collide.
+    pub fn ls_tree(&self, rev: &str) -> Result<Tree> {
+        let out = self.run(&["ls-tree", "-r", "-z", "-l", "--full-tree", rev])?;
+        let mut tree = Tree::default();
         for rec in out.split(|&b| b == 0).filter(|r| !r.is_empty()) {
-            // "<mode> SP <type> SP <oid> TAB <path>"
-            let rec = String::from_utf8_lossy(rec);
-            let Some((meta, path)) = rec.split_once('\t') else {
+            // "<mode> SP <type> SP <oid> SP+ <size> TAB <path>"
+            let Some(tab) = rec.iter().position(|&b| b == b'\t') else {
                 continue;
             };
-            let mut parts = meta.split(' ');
-            let (Some(mode), Some(kind), Some(oid)) = (parts.next(), parts.next(), parts.next())
+            let Ok(path) = std::str::from_utf8(&rec[tab + 1..]) else {
+                tree.skipped_non_utf8 += 1;
+                continue;
+            };
+            let meta = String::from_utf8_lossy(&rec[..tab]);
+            let mut parts = meta.split_whitespace();
+            let (Some(mode), Some(kind), Some(oid), Some(size)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
             else {
                 continue;
             };
             if kind == "blob" && mode != "120000" {
-                entries.push(TreeEntry {
+                tree.entries.push(TreeEntry {
                     path: path.to_owned(),
                     oid: oid.to_owned(),
+                    size: size.parse().unwrap_or(u64::MAX),
                 });
             }
         }
-        Ok(entries)
-    }
-
-    /// Paths changed between two revisions (both must exist locally).
-    pub fn diff_names(&self, from: &str, to: &str) -> Result<Vec<String>> {
-        let out = self.run(&["diff", "--name-only", "-z", "--no-renames", from, to])?;
-        Ok(out
-            .split(|&b| b == 0)
-            .filter(|r| !r.is_empty())
-            .map(|r| String::from_utf8_lossy(r).into_owned())
-            .collect())
+        Ok(tree)
     }
 
     /// Opens a `git cat-file --batch` reader for fetching blob contents by id.
@@ -136,26 +153,35 @@ impl BlobReader {
         })
     }
 
-    /// Reads one blob. Returns `None` if the object is missing.
-    pub fn read(&mut self, oid: &str) -> Result<Option<Vec<u8>>> {
+    /// Reads one blob, refusing (without buffering) anything larger than `max` bytes.
+    pub fn read(&mut self, oid: &str, max: u64) -> Result<Blob> {
         writeln!(self.stdin, "{oid}")?;
         self.stdin.flush()?;
         let mut header = String::new();
         self.stdout.read_line(&mut header)?;
         let header = header.trim_end();
         if header.ends_with(" missing") {
-            return Ok(None);
+            return Ok(Blob::Missing);
         }
         // "<oid> SP <type> SP <size>"
-        let size: usize = header
+        let size: u64 = header
             .rsplit(' ')
             .next()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| GitError::Protocol(header.to_owned()))?;
-        let mut buf = vec![0; size + 1]; // content plus trailing LF
+        if size > max {
+            // Content plus trailing LF must still be consumed to keep the batch stream in sync.
+            let skipped = io::copy(&mut (&mut self.stdout).take(size + 1), &mut io::sink())?;
+            if skipped != size + 1 {
+                return Err(GitError::Protocol(format!("short read of {oid}")));
+            }
+            return Ok(Blob::TooLarge(size));
+        }
+        let len = usize::try_from(size).map_err(|_| GitError::Protocol(header.to_owned()))?;
+        let mut buf = vec![0; len + 1]; // content plus trailing LF
         self.stdout.read_exact(&mut buf)?;
         buf.pop();
-        Ok(Some(buf))
+        Ok(Blob::Data(buf))
     }
 }
 

@@ -8,15 +8,13 @@ use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use oi_git::{GitError, Repo, TreeEntry};
+use oi_git::{Blob, GitError, Repo, TreeEntry};
 use oi_lang::Registry;
 use oi_model::{FileFacts, Lang};
 use oi_store::{Store, StoreError};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 
-/// Bump whenever extraction output changes, so existing indexes re-extract every file instead of
-/// keeping facts from the old extractor for unchanged blobs.
-pub const EXTRACTOR_VERSION: &str = "8";
+pub use oi_lang::EXTRACTOR_VERSION;
 
 /// Blobs larger than this are skipped; at this size C/C++ is almost always generated.
 pub const DEFAULT_MAX_FILE_BYTES: usize = 4 << 20;
@@ -41,6 +39,9 @@ pub struct UpdateStats {
     pub extracted: usize,
     pub removed: usize,
     pub skipped_large: usize,
+    /// Paths that are not valid UTF-8; never indexed.
+    pub skipped_non_utf8: usize,
+    /// Extraction failed or panicked; the file is recorded without facts.
     pub failed: usize,
     pub bytes: u64,
     pub list_time: Duration,
@@ -57,8 +58,13 @@ pub struct Indexer {
 struct Extracted {
     entry: TreeEntry,
     lang: Lang,
-    facts: Option<FileFacts>,
-    bytes: usize,
+    outcome: Outcome,
+}
+
+enum Outcome {
+    Facts(FileFacts, usize),
+    TooLarge,
+    Failed(usize),
 }
 
 impl Indexer {
@@ -85,10 +91,15 @@ impl Indexer {
             ..UpdateStats::default()
         };
         let tree = self.repo.ls_tree(&stats.commit)?;
+        stats.skipped_non_utf8 = tree.skipped_non_utf8;
+        let tree = tree.entries;
         stats.tree_files = tree.len();
+        // Everything below happens in one write transaction, so a concurrent update can't
+        // change the indexed set between reading it and writing.
+        let mut writer = store.writer()?;
         // An index built by a different extractor is stale for every file, whatever its blob id.
-        let same_extractor = store.meta("extractor")?.as_deref() == Some(EXTRACTOR_VERSION);
-        let indexed = store.files()?;
+        let same_extractor = writer.meta("extractor")?.as_deref() == Some(EXTRACTOR_VERSION);
+        let indexed = writer.files()?;
 
         let mut todo: Vec<(TreeEntry, Lang)> = Vec::new();
         let mut live: HashSet<&str> = HashSet::new();
@@ -114,7 +125,6 @@ impl Indexer {
         stats.list_time = start.elapsed();
 
         let extract_start = Instant::now();
-        let mut writer = store.writer()?;
         for id in stale {
             writer.remove_file(id)?;
         }
@@ -130,6 +140,7 @@ impl Indexer {
     }
 
     /// Reads blobs on one thread, extracts on the rayon pool, writes on the caller's thread.
+    /// Oversized blobs are never read; a panicking extractor fails only its own file.
     fn extract_into(
         &self,
         todo: Vec<(TreeEntry, Lang)>,
@@ -137,16 +148,22 @@ impl Indexer {
         stats: &mut UpdateStats,
     ) -> Result<()> {
         let mut reader = self.repo.blob_reader()?;
-        let (blob_tx, blob_rx) = sync_channel::<(TreeEntry, Lang, Vec<u8>)>(512);
+        let (blob_tx, blob_rx) = sync_channel::<(TreeEntry, Lang, Option<Vec<u8>>)>(512);
         let (fact_tx, fact_rx) = sync_channel::<Extracted>(512);
-        let max = self.max_file_bytes;
+        let max = u64::try_from(self.max_file_bytes).unwrap_or(u64::MAX);
         let registry = &self.registry;
 
         thread::scope(|s| {
             let read = s.spawn(move || -> Result<()> {
                 for (entry, lang) in todo {
-                    let Some(bytes) = reader.read(&entry.oid)? else {
-                        continue;
+                    let bytes = if entry.size > max {
+                        None
+                    } else {
+                        match reader.read(&entry.oid, max)? {
+                            Blob::Data(bytes) => Some(bytes),
+                            Blob::TooLarge(_) => None,
+                            Blob::Missing => continue,
+                        }
                     };
                     if blob_tx.send((entry, lang, bytes)).is_err() {
                         break;
@@ -158,18 +175,14 @@ impl Indexer {
                 blob_rx.into_iter().par_bridge().for_each_with(
                     fact_tx,
                     |tx, (entry, lang, bytes)| {
-                        let facts = if bytes.len() > max {
-                            None
-                        } else {
-                            registry
-                                .for_path(&entry.path)
-                                .and_then(|x| x.extract_path(&entry.path, &bytes).ok())
+                        let outcome = match bytes {
+                            None => Outcome::TooLarge,
+                            Some(bytes) => extract_one(registry, &entry.path, &bytes),
                         };
                         let _ = tx.send(Extracted {
                             entry,
                             lang,
-                            facts,
-                            bytes: bytes.len(),
+                            outcome,
                         });
                     },
                 );
@@ -180,18 +193,19 @@ impl Indexer {
                 if result.is_err() {
                     continue; // drain so the producers can finish
                 }
-                stats.bytes += item.bytes as u64;
-                let facts = match item.facts {
-                    Some(f) => {
+                let facts = match item.outcome {
+                    Outcome::Facts(f, len) => {
                         stats.extracted += 1;
+                        stats.bytes += len as u64;
                         f
                     }
-                    None if item.bytes > max => {
+                    Outcome::TooLarge => {
                         stats.skipped_large += 1;
                         FileFacts::default()
                     }
-                    None => {
+                    Outcome::Failed(len) => {
                         stats.failed += 1;
+                        stats.bytes += len as u64;
                         FileFacts::default()
                     }
                 };
@@ -203,5 +217,19 @@ impl Indexer {
             read.join().expect("blob reader thread panicked")?;
             result
         })
+    }
+}
+
+/// Extracts one file. A panic inside a parser or extractor is contained here: it fails this
+/// file only, instead of tearing down the whole index run.
+fn extract_one(registry: &Registry, path: &str, bytes: &[u8]) -> Outcome {
+    let run = || {
+        registry
+            .for_path(path)
+            .and_then(|x| x.extract_path(path, bytes).ok())
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Some(facts)) => Outcome::Facts(facts, bytes.len()),
+        Ok(None) | Err(_) => Outcome::Failed(bytes.len()),
     }
 }

@@ -9,6 +9,9 @@ Usage:
 --bin     directory holding the `orch-index` binary (put on PATH for the index arm only)
 --out     results directory; one raw JSON per run plus summary.md
 
+Run it only on trusted corpora: the agents get Bash pre-approved inside the checkout, and a
+corpus shipping .claude/, CLAUDE.md or .mcp.json is refused.
+
 Both arms get the same model, effort, tools, role prompt and question. The index arm additionally
 gets bench/index-arm.md appended to its system prompt. User settings are excluded
 (--setting-sources project) so local hooks cannot alter prompts.
@@ -33,6 +36,14 @@ def role_prompt() -> str:
     text = ROLE.read_text()
     m = re.match(r"^---\n.*?\n---\n(.*)$", text, re.S)
     return m.group(1) if m else text
+
+
+def check_corpus(corpus):
+    """The agents get Bash pre-approved inside the corpus. Refuse corpora that ship their own
+    Claude Code configuration (hooks, settings, instructions): only run on trusted checkouts."""
+    for name in (".claude", "CLAUDE.md", ".mcp.json"):
+        if (Path(corpus) / name).exists():
+            sys.exit(f"refusing: {corpus}/{name} exists; this harness runs agents with Bash in the corpus")
 
 
 def run_one(args, q, arm, rep, answer_format):
@@ -164,6 +175,7 @@ def main():
     if not args.score_only:
         if not (args.corpus and args.bin):
             sys.exit("--corpus and --bin are required unless --score-only")
+        check_corpus(args.corpus)
         qs = [q for q in spec["questions"] if not args.only or q["id"] in args.only.split(",")]
         jobs = [(q, arm, rep) for rep in range(1, args.reps + 1) for q in qs
                 for arm in args.arms.split(",")]

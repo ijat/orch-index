@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use std::thread::LocalKey;
 
 use oi_model::{BaseClass, FileFacts, Include, RefKind, Reference, Symbol, SymbolKind};
-use tree_sitter::{Language, Node, Parser, Tree};
+use std::time::{Duration, Instant};
+
+use tree_sitter::{Language, Node, Parser, Tree, TreeCursor};
 
 use crate::ExtractError;
 
@@ -53,6 +55,12 @@ pub(crate) struct State<'a> {
     name_nodes: HashSet<usize>,
     /// (name, kind, line) already recorded, so a line mentioning a name twice yields one ref.
     seen_refs: HashSet<(String, RefKind, u32)>,
+    /// Ancestors of the node being entered, root first.
+    ancestors: Vec<Node<'a>>,
+    /// The previous sibling of the node being entered.
+    prev: Option<Node<'a>>,
+    /// The walk skipped part of the tree (depth cap or time budget).
+    truncated: bool,
 }
 
 impl<'a> State<'a> {
@@ -64,6 +72,52 @@ impl<'a> State<'a> {
             functions: Vec::new(),
             name_nodes: HashSet::new(),
             seen_refs: HashSet::new(),
+            ancestors: Vec::new(),
+            prev: None,
+            truncated: false,
+        }
+    }
+
+    /// Parent of the node being entered.
+    pub fn parent(&self) -> Option<Node<'a>> {
+        self.ancestors.last().copied()
+    }
+
+    /// Ancestors of the node being entered, innermost first.
+    pub fn ancestors(&self) -> impl Iterator<Item = Node<'a>> + '_ {
+        self.ancestors.iter().rev().copied()
+    }
+
+    /// The `n`-th ancestor of the node being entered (1 = parent).
+    pub fn ancestor(&self, n: usize) -> Option<Node<'a>> {
+        self.ancestors
+            .len()
+            .checked_sub(n)
+            .map(|i| self.ancestors[i])
+    }
+
+    /// The previous sibling of the node being entered.
+    pub fn prev_sibling(&self) -> Option<Node<'a>> {
+        self.prev
+    }
+
+    /// Whether an error node being entered sits at declaration level rather than inside a
+    /// function body.
+    fn is_structural_error(&self) -> bool {
+        self.ancestors()
+            .find(|p| !p.is_error())
+            .is_none_or(|p| DECLARATION_CONTAINERS.contains(&p.kind()))
+    }
+
+    /// Records that the walk stopped early: facts from this file are incomplete.
+    fn truncate(&mut self) {
+        self.truncated = true;
+        self.facts.structural_errors += 1;
+    }
+
+    fn truncate_once(&mut self) {
+        if !self.truncated {
+            self.truncate();
         }
     }
 
@@ -225,46 +279,78 @@ const DECLARATION_CONTAINERS: &[&str] = &[
     "object_type",
 ];
 
-/// Whether an error node sits at declaration level rather than inside a function body.
-fn is_structural_error(node: Node<'_>) -> bool {
-    let mut ctx = node.parent();
-    while let Some(p) = ctx.filter(Node::is_error) {
-        ctx = p.parent();
-    }
-    ctx.is_none_or(|p| DECLARATION_CONTAINERS.contains(&p.kind()))
-}
+/// Deeper nodes are not visited. Real code stays far below this; hostile or generated input
+/// (thousands of nested namespaces or parentheses) would otherwise cost time and memory
+/// quadratic in depth.
+const MAX_DEPTH: usize = 1024;
+
+/// Wall-clock budget for walking one file. Past it the walk stops and the file is reported as
+/// damaged, so one pathological file cannot stall an index run.
+const TIME_BUDGET: Duration = Duration::from_secs(5);
 
 /// A language's node handler, driven by [`walk`].
 pub(crate) trait Visit<'a> {
     fn state(&mut self) -> &mut State<'a>;
-    fn enter(&mut self, node: Node<'a>);
+    /// Called for each node in pre-order. `cursor` points at `node`; use [`next_siblings`] to
+    /// look ahead cheaply, and [`State::parent`] / [`State::ancestors`] /
+    /// [`State::prev_sibling`] instead of the O(depth) or O(siblings) tree-sitter equivalents.
+    fn enter(&mut self, node: Node<'a>, cursor: &TreeCursor<'a>);
+}
+
+/// The siblings after the cursor's node, in order. Each step is O(1), unlike
+/// `Node::next_sibling`, which rescans the parent's children.
+pub(crate) fn next_siblings<'a>(cursor: &TreeCursor<'a>) -> impl Iterator<Item = Node<'a>> {
+    let mut c = cursor.clone();
+    std::iter::from_fn(move || c.goto_next_sibling().then(|| c.node()))
 }
 
 /// Iterative pre-order walk; deep expression trees in generated code would overflow a recursive
-/// one. Counts syntax-error nodes and closes scopes as their nodes are left.
+/// one. Counts syntax-error nodes, tracks ancestors, and closes scopes as their nodes are left.
 pub(crate) fn walk<'a, V: Visit<'a>>(visitor: &mut V, root: Node<'a>) {
+    let start = Instant::now();
+    let mut visited: u64 = 0;
     let mut cursor = root.walk();
+    visitor.state().ancestors.clear();
+    visitor.state().prev = None;
     loop {
         let node = cursor.node();
         if node.is_error() || node.is_missing() {
+            let structural = visitor.state().is_structural_error();
             let facts = &mut visitor.state().facts;
             facts.parse_errors += 1;
-            if is_structural_error(node) {
+            if structural {
                 facts.structural_errors += 1;
             }
         }
-        visitor.enter(node);
-        if cursor.goto_first_child() {
-            continue;
+        visitor.enter(node, &cursor);
+        visited += 1;
+        if visited.is_multiple_of(4096) && start.elapsed() > TIME_BUDGET {
+            visitor.state().truncate();
+            return;
+        }
+        let st = visitor.state();
+        if st.ancestors.len() < MAX_DEPTH {
+            if cursor.goto_first_child() {
+                st.ancestors.push(node);
+                st.prev = None;
+                continue;
+            }
+        } else if node.child_count() > 0 {
+            st.truncate_once();
         }
         loop {
-            visitor.state().leave(cursor.node());
+            let left = cursor.node();
+            visitor.state().leave(left);
             if cursor.goto_next_sibling() {
+                visitor.state().prev = Some(left);
                 break;
             }
             if !cursor.goto_parent() {
                 return;
             }
+            let st = visitor.state();
+            st.ancestors.pop();
+            st.prev = None; // unknown for the parent; only read on entering a node
         }
     }
 }

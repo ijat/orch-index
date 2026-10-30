@@ -116,6 +116,9 @@ fn neutralize_statements(src: &[u8]) -> (Option<Vec<u8>>, Vec<Blanked>) {
 /// If the line starting at `start` is a lone statement-like macro, returns the end offset of the
 /// invocation (after its closing parenthesis, possibly on a later line).
 fn statement_macro_at(src: &[u8], start: usize, line_end: usize) -> Option<usize> {
+    if inside_list(src, start) {
+        return None;
+    }
     let name_start = start + leading_ws(&src[start..line_end]);
     let name_len = ident_len(&src[name_start..line_end]);
     let name = &src[name_start..name_start + name_len];
@@ -143,6 +146,46 @@ fn statement_macro_at(src: &[u8], start: usize, line_end: usize) -> Option<usize
         return None;
     }
     Some(end)
+}
+
+/// Whether the line starting at `start` continues a list rather than starting a statement: the
+/// previous code ends with `,` (`RED,\n BLUE`), or with the `{` of an `enum` (`enum E {\n ONLY`).
+fn inside_list(src: &[u8], start: usize) -> bool {
+    // The previous non-blank line, without a trailing `//` comment.
+    let mut end = start;
+    let prev = loop {
+        if end == 0 {
+            return false;
+        }
+        let line_start = src[..end - 1]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1);
+        let line = &src[line_start..end - 1];
+        let code = line
+            .windows(2)
+            .position(|w| w == b"//")
+            .map_or(line, |i| &line[..i]);
+        let code = trim_ascii(code);
+        if !code.is_empty() {
+            break code;
+        }
+        end = line_start;
+    };
+    match prev.last() {
+        Some(b',' | b'(' | b'=' | b'|' | b'&' | b'+' | b'-' | b'?' | b':') => true,
+        Some(b'{') => {
+            // Text since the previous statement or block boundary: does it open an enum?
+            let before = &prev[..prev.len() - 1];
+            let head = before
+                .iter()
+                .rposition(|&b| matches!(b, b';' | b'{' | b'}'))
+                .map_or(before, |i| &before[i + 1..]);
+            head.split(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+                .any(|w| w == b"enum")
+        }
+        _ => false,
+    }
 }
 
 /// Whether the next token starts the rest of a declaration (`Name(`, `Name::`, `{`, `:` ...).
@@ -283,6 +326,23 @@ mod tests {
         ] {
             assert_eq!(run(keep).0, keep);
         }
+    }
+
+    #[test]
+    fn keeps_enumerators_and_list_items() {
+        for src in [
+            "enum Color {\n  RED,\n  GREEN, // c\n  BLUE\n};\n",
+            "enum E {\n  ONLY\n};\n",
+            "enum class E : int {\n  ONLY_ONE\n};\n",
+            "int x = f(a,\n          MAX_SIZE\n);\n",
+        ] {
+            let (text, b) = run(src);
+            assert_eq!(text, src);
+            assert!(b.is_empty(), "{src}");
+        }
+        // A class body holding only a macro is still a macro line.
+        let (_, b) = run("class A {\n  NS_DECL_ISUPPORTS\n};\n");
+        assert_eq!(b.len(), 1);
     }
 
     #[test]

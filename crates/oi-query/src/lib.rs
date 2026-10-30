@@ -3,10 +3,15 @@
 //! Every answer is a list of [`Hit`]s with a provenance and, where useful, a note explaining why
 //! the confidence is what it is. Rendering is the caller's job.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 
-use oi_git::{GitError, Repo};
-use oi_model::{Provenance, RefKind, SymbolKind, key_of};
+use oi_git::{Blob, GitError, Repo};
+
+/// Blobs larger than this are not read for snippets (indexed files are far smaller).
+const SNIPPET_MAX_BLOB: u64 = 64 << 20;
+use oi_model::{Lang, Provenance, RefKind, SymbolKind, key_of};
 use oi_store::{Filter, Store, StoreError, SymbolHit};
 use serde::Serialize;
 
@@ -38,17 +43,54 @@ pub struct Hit {
     oid: String,
 }
 
+impl Hit {
+    /// Escapes control characters in every text field (see [`sanitize`]). Call before printing.
+    pub fn sanitize(&mut self) {
+        for field in [&mut self.path, &mut self.detail] {
+            if let Cow::Owned(clean) = sanitize(field) {
+                *field = clean;
+            }
+        }
+        for field in [&mut self.note, &mut self.snippet].into_iter().flatten() {
+            if let Cow::Owned(clean) = sanitize(field) {
+                *field = clean;
+            }
+        }
+    }
+}
+
+/// Escapes C0 controls (including newline and CR), DEL and C1 controls as `\u{..}`, so text from
+/// an indexed repository cannot forge output rows or send terminal escape sequences.
+#[must_use]
+pub fn sanitize(s: &str) -> Cow<'_, str> {
+    let is_control = |c: char| c.is_control();
+    if !s.chars().any(is_control) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if is_control(c) {
+            let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Index freshness relative to the repository.
 #[derive(Debug, Clone, Serialize)]
 pub struct Freshness {
     pub indexed: Option<String>,
     pub head: Option<String>,
+    /// The index was built by a different extractor version than this binary's.
+    pub extractor_outdated: bool,
 }
 
 impl Freshness {
     #[must_use]
     pub fn is_stale(&self) -> bool {
-        self.indexed != self.head
+        self.indexed != self.head || self.extractor_outdated
     }
 }
 
@@ -67,6 +109,8 @@ impl<'a> Engine<'a> {
         Ok(Freshness {
             indexed: self.store.meta("commit")?,
             head: self.repo.rev_parse("HEAD").ok(),
+            extractor_outdated: self.store.meta("extractor")?.as_deref()
+                != Some(oi_lang::EXTRACTOR_VERSION),
         })
     }
 
@@ -188,7 +232,7 @@ impl<'a> Engine<'a> {
             .map(|b| self.derived_closure(b))
             .transpose()?;
         let wanted_sig = signature.map(normalize_signature);
-        let mut by_class: BTreeMap<String, Vec<SymbolHit>> = BTreeMap::new();
+        let mut by_class: BTreeMap<(String, String), Vec<SymbolHit>> = BTreeMap::new();
         for s in self.store.symbols(method, &[SymbolKind::Method], filter)? {
             if s.scope.is_empty()
                 || wanted_sig
@@ -204,7 +248,19 @@ impl<'a> Engine<'a> {
                     continue;
                 }
             }
-            by_class.entry(s.scope.clone()).or_default().push(s);
+            // A C++ class in a named scope is declared in a header and defined in a .cc: one
+            // class across files. Elsewhere (other languages, anonymous namespaces) the same
+            // qualified name in two files is two classes.
+            let per_file = s.lang != Some(Lang::Cpp) || s.scope.contains("(anonymous)");
+            let file_key = if per_file {
+                s.path.clone()
+            } else {
+                String::new()
+            };
+            by_class
+                .entry((s.scope.clone(), file_key))
+                .or_default()
+                .push(s);
         }
         Ok(by_class
             .into_values()
@@ -276,7 +332,7 @@ impl<'a> Engine<'a> {
         oids.sort();
         oids.dedup();
         for oid in oids {
-            let Some(blob) = reader.read(&oid)? else {
+            let Blob::Data(blob) = reader.read(&oid, SNIPPET_MAX_BLOB)? else {
                 continue;
             };
             let text = String::from_utf8_lossy(&blob);
@@ -565,6 +621,15 @@ mod tests {
         assert!(segments("crate::store::Store").ends_with(&segments("store::Store")));
         assert!(segments("System.Linq").ends_with(&segments("Linq")));
         assert!(!segments("System.Linq").ends_with(&segments("inq")));
+    }
+
+    #[test]
+    fn sanitize_escapes_controls() {
+        assert!(matches!(sanitize("plain::name"), Cow::Borrowed(_)));
+        assert_eq!(sanitize("x\nFAKE.c:1"), "x\\u{a}FAKE.c:1");
+        assert_eq!(sanitize("\u{1b}]0;pwn\u{7}"), "\\u{1b}]0;pwn\\u{7}");
+        assert_eq!(sanitize("a\u{9b}b\u{7f}"), "a\\u{9b}b\\u{7f}");
+        assert_eq!(sanitize("tab\there é"), "tab\\u{9}here é");
     }
 
     #[test]

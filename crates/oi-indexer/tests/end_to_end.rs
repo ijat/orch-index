@@ -267,3 +267,149 @@ fn languages_imports_and_damage_labels() {
     assert!(engine.refs("Store", None, cs_only).unwrap().is_empty());
     assert_eq!(clean[0].note, None);
 }
+
+/// A repository built to hurt the indexer: none of this may crash it, stall it or let file
+/// contents forge output.
+#[test]
+fn hostile_repository() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::time::Instant;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    git(d, &["init", "-q"]);
+    // Deep nesting: quadratic in a naive walker, and a stack overflow in a recursive one.
+    let depth = 3000;
+    write(
+        d,
+        "deep.cc",
+        &format!(
+            "{}int x;{}",
+            "namespace a{".repeat(depth),
+            "}".repeat(depth)
+        ),
+    );
+    let uses = 15_000;
+    write(
+        d,
+        "deep.rs",
+        &format!("use a::{}x{};\n", "{b::".repeat(uses), "}".repeat(uses)),
+    );
+    // Over the size limit: recorded, never read into memory.
+    write(d, "big.cc", &"int y;\n".repeat(40_000));
+    // A file name that would forge an extra result row if printed raw.
+    write(d, "x\nFAKE.c", "void forged() {}\n");
+    git(d, &["add", "-A"]);
+    // Two paths that differ only in invalid UTF-8 bytes (and would collide after lossy decoding).
+    let blob = Command::new("git")
+        .arg("-C")
+        .arg(d)
+        .args(["hash-object", "-w", "deep.cc"])
+        .output()
+        .unwrap();
+    let blob = String::from_utf8(blob.stdout).unwrap();
+    for bad in [&b"a\xfe.c"[..], &b"a\xff.c"[..]] {
+        let mut info = b"100644,".to_vec();
+        info.extend_from_slice(blob.trim().as_bytes());
+        info.push(b',');
+        info.extend_from_slice(bad);
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(std::ffi::OsStr::from_bytes(&info))
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    git(d, &["commit", "-q", "-m", "hostile"]);
+
+    let repo = Repo::new(d);
+    let mut store = Store::in_memory().unwrap();
+    let start = Instant::now();
+    let stats = Indexer::new(repo.clone())
+        .with_max_file_bytes(200_000)
+        .update(&mut store, "HEAD")
+        .unwrap();
+    assert!(start.elapsed().as_secs() < 20, "took {:?}", start.elapsed());
+    assert_eq!(stats.skipped_non_utf8, 2);
+    assert_eq!(stats.skipped_large, 1);
+    assert_eq!(stats.failed, 0);
+
+    let engine = Engine::new(&store, &repo);
+    // Past the depth cap the walk stops, and hits from the file are flagged.
+    let ns = engine
+        .def("a", &[SymbolKind::Namespace], Filter::default())
+        .unwrap();
+    assert!(!ns.is_empty() && ns.len() < depth);
+    assert_eq!(ns[0].note.as_deref(), Some("parse-errors"));
+    let mut forged = engine.def("forged", &[], Filter::default()).unwrap();
+    forged[0].sanitize();
+    assert_eq!(forged[0].path, "x\\u{a}FAKE.c");
+}
+
+#[test]
+fn review_regressions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    git(d, &["init", "-q"]);
+    write(
+        d,
+        "a/x.ts",
+        "export class Widget extends Base { draw() {} }\nexport class Alpha extends Base { draw() {} }\n",
+    );
+    write(
+        d,
+        "b/y.ts",
+        "export class Widget extends Base { draw() {} }\n",
+    );
+    write(d, "web/lib/index.ts", "export const v = 1;\n");
+    write(d, "web/lib/sub/use.ts", "import { v } from '..';\n");
+    write(d, "src/main.rs", "use std::io::{self, Write};\n");
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-q", "-m", "one"]);
+    let repo = Repo::new(d);
+
+    // Two concurrent full updates on one database: both succeed, one waits for the other.
+    let db = d.join("index.db");
+    let runs: Vec<_> = (0..2)
+        .map(|_| {
+            let (repo, db) = (repo.clone(), db.clone());
+            std::thread::spawn(move || {
+                let mut store = Store::open(&db).unwrap();
+                Indexer::new(repo)
+                    .update(&mut store, "HEAD")
+                    .map(|s| s.indexable)
+            })
+        })
+        .collect();
+    for r in runs {
+        assert_eq!(r.join().unwrap().unwrap(), 5);
+    }
+    let store = Store::open(&db).unwrap();
+    let engine = Engine::new(&store, &repo);
+
+    // Same qualified name in two files: two classes, not one.
+    let over = engine
+        .overrides("draw", Some("Base"), None, Filter::default())
+        .unwrap();
+    let rows: Vec<_> = over
+        .iter()
+        .map(|h| (h.detail.as_str(), h.path.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("Alpha ()", "a/x.ts"),
+            ("Widget ()", "a/x.ts"),
+            ("Widget ()", "b/y.ts")
+        ]
+    );
+    let importers = engine.importers("std::io", Filter::default()).unwrap();
+    assert_eq!(importers.len(), 1);
+    let inc = engine
+        .includers("web/lib/index.ts", Filter::default())
+        .unwrap();
+    assert_eq!(inc.len(), 1, "{inc:#?}");
+    assert!(!engine.freshness().unwrap().is_stale());
+}

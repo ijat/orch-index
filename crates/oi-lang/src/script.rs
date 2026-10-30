@@ -6,7 +6,7 @@
 //! package specs (`react`, `@scope/pkg`) are module imports.
 
 use oi_model::{FileFacts, Lang, RefKind, Symbol, SymbolKind};
-use tree_sitter::Node;
+use tree_sitter::{Node, TreeCursor};
 
 use crate::walk::{self, ParserSlot, State, Visit, collapse_ws, line_of, qualify};
 use crate::{ExtractError, Extractor, SyntaxError, extension};
@@ -135,7 +135,7 @@ impl<'a> Visit<'a> for Walker<'a> {
         &mut self.st
     }
 
-    fn enter(&mut self, node: Node<'a>) {
+    fn enter(&mut self, node: Node<'a>, _cursor: &TreeCursor<'a>) {
         match node.kind() {
             "import_statement" | "export_statement" => {
                 if let Some(src) = node.child_by_field_name("source") {
@@ -305,7 +305,7 @@ impl<'a> Walker<'a> {
         else {
             return;
         };
-        if !at_module_level(node) {
+        if !self.at_module_level() {
             return;
         }
         let value = node.child_by_field_name("value");
@@ -335,6 +335,31 @@ impl<'a> Walker<'a> {
             let scope = self.st.scope();
             self.st.symbol(name, &scope, SymbolKind::Variable);
         }
+    }
+
+    /// The node being entered is outside any function, method or block body. A TS
+    /// `namespace X { … }` body is a statement block but still module level.
+    fn at_module_level(&self) -> bool {
+        let mut ancestors = self.st.ancestors().peekable();
+        while let Some(p) = ancestors.next() {
+            match p.kind() {
+                "statement_block" => {
+                    let in_namespace = ancestors
+                        .peek()
+                        .is_some_and(|g| matches!(g.kind(), "internal_module" | "module"));
+                    if !in_namespace {
+                        return false;
+                    }
+                }
+                "class_body"
+                | "arrow_function"
+                | "function_expression"
+                | "function"
+                | "method_definition" => return false,
+                _ => {}
+            }
+        }
+        true
     }
 
     /// Parameter types where annotated (`(string, number)`), `_` where not.
@@ -387,31 +412,4 @@ fn member_name(node: Node<'_>) -> Node<'_> {
 
 fn unquote(s: &str) -> &str {
     s.trim_matches(|c| c == '"' || c == '\'' || c == '`')
-}
-
-/// Outside any function, method or block body.
-fn at_module_level(node: Node<'_>) -> bool {
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        match p.kind() {
-            "statement_block"
-            | "class_body"
-            | "arrow_function"
-            | "function_expression"
-            | "function"
-            | "method_definition" => {
-                // A TS `namespace X { … }` body is a statement_block but still module level.
-                if p.kind() == "statement_block"
-                    && p.parent()
-                        .is_some_and(|g| matches!(g.kind(), "internal_module" | "module"))
-                {
-                    cur = p.parent();
-                    continue;
-                }
-                return false;
-            }
-            _ => cur = p.parent(),
-        }
-    }
-    true
 }

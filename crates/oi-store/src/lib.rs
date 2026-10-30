@@ -59,6 +59,7 @@ pub struct SymbolHit {
     pub provenance: Provenance,
     /// The file had declaration-level syntax errors; facts from it may be incomplete.
     pub file_damaged: bool,
+    pub lang: Option<Lang>,
 }
 
 /// A reference row joined with its file.
@@ -122,21 +123,16 @@ impl Store {
 
     /// All indexed files, keyed by path.
     pub fn files(&self) -> Result<HashMap<String, FileRow>> {
-        let mut stmt = self.conn.prepare("SELECT id, path, oid FROM files")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(FileRow {
-                id: r.get(0)?,
-                path: r.get(1)?,
-                oid: r.get(2)?,
-            })
-        })?;
-        rows.map(|r| r.map(|f| (f.path.clone(), f)).map_err(Into::into))
-            .collect()
+        read_files(&self.conn)
     }
 
-    /// Starts a write batch. Nothing is visible to readers until [`Writer::commit`].
+    /// Starts a write batch. Nothing is visible to readers until [`Writer::commit`]. The
+    /// transaction takes the write lock immediately, so a concurrent update waits (up to the
+    /// busy timeout) instead of failing halfway; read state through the writer, not the store.
     pub fn writer(&mut self) -> Result<Writer<'_>> {
-        let tx = self.conn.transaction()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut names = HashMap::new();
         {
             let mut stmt = tx.prepare("SELECT id, name FROM names")?;
@@ -168,7 +164,7 @@ impl Store {
         };
         let mut stmt = self.conn.prepare_cached(
             "SELECT f.path, f.oid, s.line, s.scope, s.kind, s.is_def, s.signature, s.is_virtual, s.prov,
-                    f.structural > 0
+                    f.structural > 0, f.lang
              FROM symbols s JOIN files f ON f.id = s.file_id
              WHERE s.name_id = ?1 AND (?2 IS NULL OR substr(f.path, 1, length(?2)) = ?2)
                AND (?3 IS NULL OR f.lang = ?3)
@@ -188,6 +184,7 @@ impl Store {
                 provenance: Provenance::parse(&r.get::<_, String>(8)?)
                     .unwrap_or(Provenance::Syntactic),
                 file_damaged: r.get(9)?,
+                lang: Lang::parse(&r.get::<_, String>(10)?),
             })
         })?;
         let mut hits = Vec::new();
@@ -335,6 +332,18 @@ pub struct Writer<'a> {
 }
 
 impl Writer<'_> {
+    /// All indexed files, as seen inside this transaction.
+    pub fn files(&self) -> Result<HashMap<String, FileRow>> {
+        read_files(&self.tx)
+    }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .tx
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
     fn intern(&mut self, name: &str) -> Result<i64> {
         if let Some(&id) = self.names.get(name) {
             return Ok(id);
@@ -461,6 +470,19 @@ impl Writer<'_> {
         self.tx.commit()?;
         Ok(())
     }
+}
+
+fn read_files(conn: &Connection) -> Result<HashMap<String, FileRow>> {
+    let mut stmt = conn.prepare("SELECT id, path, oid FROM files")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(FileRow {
+            id: r.get(0)?,
+            path: r.get(1)?,
+            oid: r.get(2)?,
+        })
+    })?;
+    rows.map(|r| r.map(|f| (f.path.clone(), f)).map_err(Into::into))
+        .collect()
 }
 
 const fn ref_kind_code(kind: RefKind) -> i64 {

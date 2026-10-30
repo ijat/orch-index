@@ -135,13 +135,6 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let repo = Repo::new(&cli.repo);
-    let db = if let Some(p) = cli.db {
-        p
-    } else {
-        let dir = repo.common_dir()?.join("orch-index");
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        dir.join("index.db")
-    };
     if let Command::Extract { file, errors } = &cli.command {
         let path = file.to_string_lossy();
         let registry = oi_lang::Registry::builtin();
@@ -161,19 +154,28 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
+    // Only now touch the repository: `extract` above works on any file, anywhere.
+    let db = if let Some(p) = cli.db {
+        p
+    } else {
+        let dir = repo.common_dir()?.join("orch-index");
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        dir.join("index.db")
+    };
     let mut store = Store::open(&db).with_context(|| format!("opening {}", db.display()))?;
 
     match cli.command {
         Command::Index { rev } => {
             let stats = Indexer::new(repo).update(&mut store, &rev)?;
             println!(
-                "indexed {} ({}): {} extracted, {} unchanged, {} removed, {} skipped (large), {} failed; {} indexable of {} files; {:.1} MB read",
+                "indexed {} ({}): {} extracted, {} unchanged, {} removed, {} skipped (large), {} skipped (non-UTF-8 path), {} failed; {} indexable of {} files; {:.1} MB read",
                 short(&stats.commit),
                 rev,
                 stats.extracted,
                 stats.unchanged,
                 stats.removed,
                 stats.skipped_large,
+                stats.skipped_non_utf8,
                 stats.failed,
                 stats.indexable,
                 stats.tree_files,
@@ -290,6 +292,11 @@ fn print_hits(
     out: &Output,
     snippets: bool,
 ) -> Result<()> {
+    // Repository text (paths, names, include specs) is untrusted: escape control characters
+    // before it reaches an agent's terminal or JSON consumer.
+    for h in &mut hits {
+        h.sanitize();
+    }
     if out.files {
         return print_files(engine, what, &hits, out);
     }
@@ -302,6 +309,9 @@ fn print_hits(
     let rest: Vec<Hit> = hits.split_off(shown);
     if snippets && !out.no_snippet {
         engine.attach_snippets(&mut hits)?;
+        for h in &mut hits {
+            h.sanitize();
+        }
     }
     let fresh = engine.freshness()?;
     let mut stdout = io::stdout().lock();
@@ -348,20 +358,21 @@ fn print_hits(
 
 /// Hits grouped per file (hits arrive sorted by path), with the file's label when all agree.
 fn print_files(engine: &Engine<'_>, what: &str, hits: &[Hit], out: &Output) -> Result<()> {
-    let mut files: Vec<(&str, usize, BTreeSet<String>)> = Vec::new();
+    // Grouped by path whatever order the query returned (overrides sorts by class).
+    let mut grouped: BTreeMap<&str, (usize, BTreeSet<String>)> = BTreeMap::new();
     for h in hits {
         let label = match &h.note {
             Some(n) => format!("{}:{n}", h.provenance),
             None => h.provenance.to_string(),
         };
-        match files.last_mut() {
-            Some((path, n, labels)) if *path == h.path => {
-                *n += 1;
-                labels.insert(label);
-            }
-            _ => files.push((&h.path, 1, BTreeSet::from([label]))),
-        }
+        let entry = grouped.entry(&h.path).or_default();
+        entry.0 += 1;
+        entry.1.insert(label);
     }
+    let files: Vec<(&str, usize, BTreeSet<String>)> = grouped
+        .into_iter()
+        .map(|(path, (n, labels))| (path, n, labels))
+        .collect();
     let total_files = files.len();
     let shown = if out.limit == 0 {
         total_files
@@ -429,6 +440,9 @@ fn freshness_note(f: &Freshness) -> String {
             short(i),
             short(h)
         ),
+        _ if f.extractor_outdated => {
+            " (index built by an older orch-index: run `orch-index index`)".to_owned()
+        }
         _ => String::new(),
     }
 }

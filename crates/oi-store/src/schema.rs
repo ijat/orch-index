@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::{Result, StoreError};
@@ -63,10 +65,38 @@ CREATE INDEX IF NOT EXISTS bases_derived ON bases (derived_id);
 CREATE INDEX IF NOT EXISTS bases_file ON bases (file_id);
 ";
 
+const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Switches to WAL once. Changing the journal mode needs an exclusive lock and `SQLite` does not
+/// run the busy handler for it, so retry while another connection is writing.
+fn enable_wal(conn: &Connection) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        if mode.eq_ignore_ascii_case("wal") {
+            return Ok(());
+        }
+        // The reply is the mode now in effect: `memory` for in-memory databases, which cannot
+        // use WAL. Either way the switch is settled; only a busy database is retried.
+        match conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0)) {
+            Ok(_) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy
+                    && start.elapsed() < BUSY_TIMEOUT =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 pub(crate) fn init(conn: &Connection) -> Result<()> {
+    // Concurrent `index` runs (parallel agents) wait for each other rather than fail.
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    enable_wal(conn)?;
     conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
+        "PRAGMA synchronous = NORMAL;
          PRAGMA temp_store = MEMORY;
          PRAGMA cache_size = -262144;",
     )?;
@@ -79,7 +109,8 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
     match found.and_then(|v| v.parse::<i64>().ok()) {
         None => {
             conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema', ?1)",
+                // Two processes may create the same fresh index at once.
+                "INSERT INTO meta (key, value) VALUES ('schema', ?1) ON CONFLICT(key) DO NOTHING",
                 [VERSION.to_string()],
             )?;
         }

@@ -247,6 +247,9 @@ pub fn key_of(spec: &str, module: bool) -> &str {
         spec.rsplit(['/', '.', ':'])
             .find(|s| !s.is_empty())
             .unwrap_or(spec)
+    } else if spec.bytes().all(|b| b == b'.' || b == b'/') {
+        // `import x from ".."` names a directory, i.e. its index file.
+        "index"
     } else {
         let file = spec.rsplit('/').next().unwrap_or(spec);
         match file.split_once('.') {
@@ -293,6 +296,17 @@ mod tests {
         for k in SymbolKind::ALL {
             assert_eq!(SymbolKind::parse(k.as_str()), Some(k));
         }
+    }
+
+    #[test]
+    fn include_keys() {
+        assert_eq!(key_of("a/b/c.h", false), "c");
+        assert_eq!(key_of("./widgets", false), "widgets");
+        assert_eq!(key_of("..", false), "index");
+        assert_eq!(key_of("./", false), "index");
+        assert_eq!(key_of("crate::a::B", true), "B");
+        assert_eq!(key_of("System.Linq", true), "Linq");
+        assert_eq!(key_of("@scope/pkg", true), "pkg");
     }
 
     #[test]

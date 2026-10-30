@@ -16,6 +16,10 @@ pub use csharp::CSharpExtractor;
 pub use rust::RustExtractor;
 pub use script::ScriptExtractor;
 
+/// Bump whenever extraction output changes. Indexes built by another version re-extract every
+/// file on the next update, and queries report them as stale until then.
+pub const EXTRACTOR_VERSION: &str = "9";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {
     #[error("tree-sitter rejected the {0} grammar")]

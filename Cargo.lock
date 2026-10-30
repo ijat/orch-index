@@ -347,6 +347,7 @@ name = "oi-query"
 version = "0.1.0"
 dependencies = [
  "oi-git",
+ "oi-lang",
  "oi-model",
  "oi-store",
  "serde",

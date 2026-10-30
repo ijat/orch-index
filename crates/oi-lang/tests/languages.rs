@@ -33,7 +33,7 @@ fn imports(f: &FileFacts) -> Vec<(String, bool)> {
 
 #[test]
 fn rust() {
-    let src = r#"use std::{fmt, collections::HashMap as Map};
+    let src = r#"use std::{fmt, collections::HashMap as Map, io::{self, Write}};
 use crate::store::Store;
 
 pub mod net {
@@ -72,6 +72,8 @@ fn helper(r: &Request) {}
         [
             ("std::fmt".into(), true),
             ("std::collections::HashMap".into(), true),
+            ("std::io".into(), true),
+            ("std::io::Write".into(), true),
             ("crate::store::Store".into(), true)
         ]
     );

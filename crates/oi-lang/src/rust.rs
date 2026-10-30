@@ -5,7 +5,7 @@
 //! module imports (one per leaf of a use tree), `macro_rules!` → macro, `foo!(…)` → call of `foo`.
 
 use oi_model::{FileFacts, Lang, RefKind, Symbol, SymbolKind};
-use tree_sitter::Node;
+use tree_sitter::{Node, TreeCursor};
 
 use crate::walk::{self, ParserSlot, State, Visit, collapse_ws, line_of, qualify};
 use crate::{ExtractError, Extractor, SyntaxError, extension};
@@ -54,7 +54,7 @@ impl<'a> Visit<'a> for Walker<'a> {
         &mut self.st
     }
 
-    fn enter(&mut self, node: Node<'a>) {
+    fn enter(&mut self, node: Node<'a>, cursor: &TreeCursor<'a>) {
         match node.kind() {
             "mod_item" => self.container(node, SymbolKind::Namespace),
             "trait_item" => self.container(node, SymbolKind::Interface),
@@ -72,7 +72,7 @@ impl<'a> Visit<'a> for Walker<'a> {
             "use_declaration" => {
                 if let Some(arg) = node.child_by_field_name("argument") {
                     let mut paths = Vec::new();
-                    self.use_paths(arg, "", &mut paths);
+                    self.use_paths(arg, &mut paths);
                     for p in paths {
                         self.st.import_module(p, line_of(node));
                     }
@@ -91,10 +91,11 @@ impl<'a> Visit<'a> for Walker<'a> {
             "identifier" | "field_identifier" => {
                 // Macro arguments are unparsed token trees; recover `f(…)`, `x.f::<T>(…)` and
                 // `m!(…)` there from the token sequence.
-                let called = node
+                let called = self
+                    .st
                     .parent()
                     .is_some_and(|p| matches!(p.kind(), "token_tree" | "token_repetition"))
-                    && token_call(node);
+                    && token_call(&self.st, cursor);
                 self.st
                     .reference(node, if called { RefKind::Call } else { RefKind::Use });
             }
@@ -150,16 +151,15 @@ impl<'a> Walker<'a> {
         };
         let name = self.st.text(name_node).to_owned();
         let scope = self.st.scope();
-        let parent_body = node.parent();
-        let in_impl_or_trait = parent_body
-            .and_then(|b| b.parent())
-            .is_some_and(|p| matches!(p.kind(), "impl_item" | "trait_item"));
-        let in_trait = parent_body
-            .and_then(|b| b.parent())
-            .is_some_and(|p| p.kind() == "trait_item");
-        let in_trait_impl = parent_body
-            .and_then(|b| b.parent())
-            .is_some_and(|p| p.kind() == "impl_item" && p.child_by_field_name("trait").is_some());
+        // `node` is being entered: its parent is the body, its grandparent the impl/trait.
+        let owner = self.st.ancestor(2).map(|p| p.kind());
+        let in_impl_or_trait = matches!(owner, Some("impl_item" | "trait_item"));
+        let in_trait = owner == Some("trait_item");
+        let in_trait_impl = owner == Some("impl_item")
+            && self
+                .st
+                .ancestor(2)
+                .is_some_and(|p| p.child_by_field_name("trait").is_some());
         let signature = node
             .child_by_field_name("parameters")
             .map(|p| self.signature(p))
@@ -212,8 +212,9 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Expands a use tree into full paths: `a::{b, c::d}` → `a::b`, `a::c::d`.
-    fn use_paths(&self, node: Node<'_>, prefix: &str, out: &mut Vec<String>) {
+    /// Expands a use tree into full paths: `a::{b, c::d}` → `a::b`, `a::c::d`. Iterative:
+    /// nesting depth comes from the file and must not grow the stack.
+    fn use_paths(&self, root: Node<'_>, out: &mut Vec<String>) {
         let join = |p: &str, s: &str| {
             if p.is_empty() {
                 s.to_owned()
@@ -221,33 +222,45 @@ impl<'a> Walker<'a> {
                 format!("{p}::{s}")
             }
         };
-        match node.kind() {
-            "scoped_use_list" => {
-                let path = node.child_by_field_name("path").map_or_else(
-                    || prefix.to_owned(),
-                    |p| join(prefix, &path_text(&self.st, p)),
-                );
-                if let Some(list) = node.child_by_field_name("list") {
-                    self.use_paths(list, &path, out);
+        let mut stack = vec![(root, String::new())];
+        while let Some((node, prefix)) = stack.pop() {
+            match node.kind() {
+                "scoped_use_list" => {
+                    let path = node.child_by_field_name("path").map_or_else(
+                        || prefix.clone(),
+                        |p| join(&prefix, &path_text(&self.st, p)),
+                    );
+                    if let Some(list) = node.child_by_field_name("list") {
+                        stack.push((list, path));
+                    }
                 }
-            }
-            "use_list" => {
-                let mut cursor = node.walk();
-                for child in node.named_children(&mut cursor) {
-                    self.use_paths(child, prefix, out);
+                "use_list" => {
+                    let mut cursor = node.walk();
+                    let children: Vec<_> = node.named_children(&mut cursor).collect();
+                    // Reversed so paths come out in source order.
+                    stack.extend(children.into_iter().rev().map(|c| (c, prefix.clone())));
                 }
-            }
-            "use_as_clause" => {
-                if let Some(p) = node.child_by_field_name("path") {
-                    out.push(join(prefix, &path_text(&self.st, p)));
+                "use_as_clause" => {
+                    if let Some(p) = node.child_by_field_name("path") {
+                        out.push(use_leaf(&prefix, &path_text(&self.st, p)));
+                    }
                 }
+                "use_wildcard" => {
+                    let text = path_text(&self.st, node);
+                    out.push(join(&prefix, text.trim_end_matches("::*")));
+                }
+                _ => out.push(use_leaf(&prefix, &path_text(&self.st, node))),
             }
-            "use_wildcard" => {
-                let text = path_text(&self.st, node);
-                out.push(join(prefix, text.trim_end_matches("::*")));
-            }
-            _ => out.push(join(prefix, &path_text(&self.st, node))),
         }
+    }
+}
+
+/// `prefix::leaf`, where a `self` leaf (`use std::io::{self, Write}`) names the prefix itself.
+fn use_leaf(prefix: &str, leaf: &str) -> String {
+    match (prefix.is_empty(), leaf) {
+        (false, "self") => prefix.to_owned(),
+        (true, _) => leaf.to_owned(),
+        (false, _) => format!("{prefix}::{leaf}"),
     }
 }
 
@@ -281,60 +294,55 @@ fn path_text(st: &State<'_>, node: Node<'_>) -> String {
     st.text(node).split_whitespace().collect()
 }
 
-/// Inside a token tree: is `ident` followed by `(…)`, `::<…>(…)` or `!`?
-fn token_call(ident: Node<'_>) -> bool {
+/// Inside a token tree: is the identifier being entered followed by `(…)`, `::<…>(…)` or `!`?
+fn token_call(st: &State<'_>, cursor: &TreeCursor<'_>) -> bool {
     // `fn f(..)` / `struct W(..)` in a macro body define, `$f(..)` is a metavariable.
-    if ident
+    if st
         .prev_sibling()
         .is_some_and(|p| matches!(p.kind(), "fn" | "struct" | "enum" | "union" | "trait" | "$"))
     {
         return false;
     }
     // Attribute arguments (`#[cfg(any(unix))]`) are not calls.
-    let mut up = ident.parent();
-    while let Some(p) = up {
-        if matches!(
+    if st.ancestors().any(|p| {
+        matches!(
             p.kind(),
             "attribute_item" | "inner_attribute_item" | "attribute"
-        ) {
-            return false;
-        }
-        up = p.parent();
+        )
+    }) {
+        return false;
     }
-    let Some(mut next) = ident.next_sibling() else {
+    let mut next = walk::next_siblings(cursor);
+    let Some(mut tok) = next.next() else {
         return false;
     };
-    if next.kind() == "!" {
+    if tok.kind() == "!" {
         return true;
     }
-    // Skip a turbofish `::<…>`, tracking angle-bracket depth across tokens.
-    if next.kind() == "::"
-        && let Some(lt) = next
-            .next_sibling()
-            .filter(|n| matches!(n.kind(), "<" | "<<"))
-    {
+    // Skip a turbofish `::<…>`, tracking angle-bracket depth across tokens (bounded, so a huge
+    // token tree cannot make this quadratic).
+    if tok.kind() == "::" {
         let mut depth = 0usize;
-        let mut cur = Some(lt);
-        while let Some(n) = cur {
+        for (seen, n) in next.by_ref().enumerate() {
             match n.kind() {
                 "<" => depth += 1,
                 // `::<<T as Tr>::A>` lexes the first two brackets as one token.
                 "<<" => depth += 2,
                 ">" => depth = depth.saturating_sub(1),
                 ">>" => depth = depth.saturating_sub(2),
+                _ if seen == 0 => return false, // `a::b(` is a path, handled elsewhere
                 _ => {}
             }
-            cur = n.next_sibling();
-            if depth == 0 {
+            if depth == 0 || seen > 64 {
                 break;
             }
         }
-        match cur {
-            Some(n) => next = n,
+        match next.next() {
+            Some(n) => tok = n,
             None => return false,
         }
     }
-    next.kind() == "token_tree" && next.child(0).is_some_and(|open| open.kind() == "(")
+    tok.kind() == "token_tree" && tok.child(0).is_some_and(|open| open.kind() == "(")
 }
 
 /// The name node a call expression's `function` calls: `f`, `a::f`, `x.f`, and the same with

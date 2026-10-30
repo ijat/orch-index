@@ -90,6 +90,31 @@ fn methods_decl_and_out_of_line_def() {
 }
 
 #[test]
+fn members_enums_and_sentinels() {
+    let src = "namespace n {\nclass Base {\n public:\n  Base();\n  virtual ~Base();\n  template <typename T> void visit(T t);\n  template <typename T> void run(T t) {}\n};\nenum class Color { kRed, kGreen };\nenum Plain { RED,\n  GREEN,\n  BLUE\n};\n}\n";
+    let f = CppExtractor::default().extract(src.as_bytes()).unwrap();
+    for name in ["Base", "~Base", "visit", "run"] {
+        let m = f
+            .symbols
+            .iter()
+            .find(|s| s.name == name && s.kind == SymbolKind::Method);
+        assert_eq!(
+            m.map(|s| s.scope.as_str()),
+            Some("n::Base"),
+            "{name}: {:#?}",
+            f.symbols
+        );
+    }
+    assert!(find(&f, "~Base", SymbolKind::Method)[0].is_virtual);
+    assert_eq!(
+        find(&f, "kRed", SymbolKind::Enumerator)[0].scope,
+        "n::Color"
+    );
+    assert_eq!(find(&f, "GREEN", SymbolKind::Enumerator)[0].scope, "n");
+    assert_eq!(find(&f, "BLUE", SymbolKind::Enumerator)[0].line, 12);
+}
+
+#[test]
 fn locals_are_not_symbols() {
     let f = facts();
     assert!(

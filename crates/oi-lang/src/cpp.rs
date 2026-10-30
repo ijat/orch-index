@@ -1,7 +1,7 @@
 //! C and C++ (and Objective-C++ on a best-effort basis) via tree-sitter-cpp.
 
 use oi_model::{FileFacts, Lang, RefKind, Symbol, SymbolKind};
-use tree_sitter::Node;
+use tree_sitter::{Node, TreeCursor};
 
 use crate::walk::{self, ParserSlot, State, Visit, collapse_ws, join_scope, line_of, qualify};
 use crate::{ExtractError, Extractor, SyntaxError, extension};
@@ -80,7 +80,7 @@ impl<'a> Visit<'a> for Walker<'a> {
         &mut self.st
     }
 
-    fn enter(&mut self, node: Node<'a>) {
+    fn enter(&mut self, node: Node<'a>, cursor: &TreeCursor<'a>) {
         match node.kind() {
             "preproc_include" => self.include(node),
             "preproc_def" | "preproc_function_def" => {
@@ -92,10 +92,20 @@ impl<'a> Visit<'a> for Walker<'a> {
             "class_specifier" | "struct_specifier" | "union_specifier" => self.record(node),
             "enum_specifier" => {
                 if let Some(name) = node.child_by_field_name("name")
-                    && node.child_by_field_name("body").is_some()
+                    && let Some(body) = node.child_by_field_name("body")
                 {
                     let scope = self.st.scope();
                     self.st.symbol(name, &scope, SymbolKind::Enum);
+                    // `enum class E { A }` scopes A as E::A; a plain enum's enumerators live in
+                    // the enclosing scope.
+                    let mut cursor = node.walk();
+                    let scoped = node
+                        .children(&mut cursor)
+                        .any(|c| matches!(c.kind(), "class" | "struct"));
+                    if scoped {
+                        let name = self.st.text(name).to_owned();
+                        self.st.push_scope(body, name);
+                    }
                 }
             }
             "enumerator" => {
@@ -118,9 +128,9 @@ impl<'a> Visit<'a> for Walker<'a> {
             "identifier" | "field_identifier" | "namespace_identifier" => {
                 // Inside error recovery (e.g. Objective-C in a .mm file) no call_expression is
                 // built, but `name(` is still a call.
-                let called = node.parent().is_some_and(|p| p.is_error())
-                    && node
-                        .next_sibling()
+                let called = self.st.parent().is_some_and(|p| p.is_error())
+                    && walk::next_siblings(cursor)
+                        .next()
                         .is_some_and(|s| matches!(s.kind(), "(" | "argument_list"));
                 self.st
                     .reference(node, if called { RefKind::Call } else { RefKind::Use });
@@ -219,7 +229,7 @@ impl<'a> Walker<'a> {
     fn declaration(&mut self, node: Node<'a>) {
         let in_class = node.kind() == "field_declaration";
         // Block-scope declarations are locals; `Foo bar(baz);` there is a constructor call.
-        if !in_class && !at_namespace_scope(node) {
+        if !in_class && !self.at_namespace_scope() {
             return;
         }
         let mut cursor = node.walk();
@@ -257,11 +267,16 @@ impl<'a> Walker<'a> {
         if name.is_empty() {
             return;
         }
+        // `owner` is the node being entered, so the walker's parent is its parent.
+        // Constructors, destructors and member templates arrive as `declaration` or
+        // `function_definition`, possibly wrapped in `template_declaration`: what makes them
+        // members is that the nearest non-template ancestor is a class body.
         let in_class = owner.kind() == "field_declaration"
-            || (owner.kind() == "function_definition"
-                && owner
-                    .parent()
-                    .is_some_and(|p| p.kind() == "field_declaration_list"));
+            || self
+                .st
+                .ancestors()
+                .find(|p| p.kind() != "template_declaration")
+                .is_some_and(|p| p.kind() == "field_declaration_list");
         let kind = if in_class || !qualifiers.is_empty() {
             SymbolKind::Method
         } else {
@@ -377,6 +392,15 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// Locals are not symbols: a declaration (the node being entered) counts only outside any
+    /// function body.
+    fn at_namespace_scope(&self) -> bool {
+        !self
+            .st
+            .ancestors()
+            .any(|p| matches!(p.kind(), "compound_statement" | "lambda_expression"))
+    }
+
     /// Splits `a::b::Name<T>` into (`["a", "b"]`, `"Name"`). Template arguments are dropped.
     /// When `defining`, the name parts are recorded as definition sites rather than references.
     fn split_name(&mut self, node: Node<'_>, defining: bool) -> (Vec<String>, String) {
@@ -451,16 +475,4 @@ fn innermost_name(decl: Node<'_>) -> Option<Node<'_>> {
             }
         }
     }
-}
-
-/// Locals are not symbols: a declaration counts only outside any function body.
-fn at_namespace_scope(node: Node<'_>) -> bool {
-    let mut cur = node.parent();
-    while let Some(p) = cur {
-        if matches!(p.kind(), "compound_statement" | "lambda_expression") {
-            return false;
-        }
-        cur = p.parent();
-    }
-    true
 }
