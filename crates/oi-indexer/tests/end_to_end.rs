@@ -484,7 +484,11 @@ fn git_ancestry_helpers() {
     assert!(repo.is_ancestor(&first, &first).unwrap());
     assert_eq!(repo.count_range(&first, &second).unwrap(), 1);
     assert_eq!(repo.count_range(&second, &first).unwrap(), 0);
-    assert_eq!(repo.toplevel().unwrap(), d.canonicalize().unwrap());
+    // Both sides canonicalized: on Windows git prints `C:/...`, canonicalize gives `\\?\C:\...`.
+    assert_eq!(
+        repo.toplevel().unwrap().canonicalize().unwrap(),
+        d.canonicalize().unwrap()
+    );
     // An unknown revision is an error, not "false".
     assert!(repo.is_ancestor(&first, &"0".repeat(40)).is_err());
 }
