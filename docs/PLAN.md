@@ -40,7 +40,7 @@ the tool works.
       Haiku+index vs Haiku+grep on tokens and accuracy. Scripts + results in `bench/`.
 - [~] **M4** Fix what the numbers show (Chromium-scale run done 2026-10-30, src only). Known: 43% of Firefox C/C++ files have ≥1 tree-sitter error (mostly local, in bodies/args; ~4% top-level); consider labelling hits from files with top-level errors. Ask the user before any Chromium-scale clone.
 - [x] **M4b** Extractors for Rust, JS/TS and C#, validated on rust-analyzer, vscode, node and efcore (index vs ground truth; Haiku A/B not run per language).
-- [ ] **M5** orch integration through orch-skill's workflow (later).
+- [x] **M5** orch integration through orch-skill's workflow (done 2026-10-31, orch main f0c33b5).
 
 ## Log
 
@@ -61,3 +61,4 @@ the tool works.
 - 2026-10-31: reviews done. Diff review (9 findings), whole-repo correctness review (8 + 2 likely)
   and security review (5 confirmed + hardening) all fixed with tests; no injection holes found
   (git args, SQL). Firefox/Chromium re-checked at the benchmarked commits: 8/8 exact, no-op update 0.75 s.
+- 2026-10-31: M5 done. orch-skill task `orch-graph-role` merged (f0c33b5): `orch-graph` role = index maintainer (check/rebuild), `orch-explorer` is the only query role (unconditional first command, ancestor rule + delta search, indexing marker), docs, LEDGER row. Probes old vs new on small repos: correct everywhere; the index costs +20-52% vs grep there (large-repo payoff rests on the Firefox/Chromium bench). Follow-ups for this repo: `stats` must not create `index.db`; print the older-extractor note even when behind HEAD; `callers` missed a C# method-group use (`.Select(NormalizePath)`).
