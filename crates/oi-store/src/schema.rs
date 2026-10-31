@@ -1,13 +1,17 @@
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::{Result, StoreError};
 
-/// Bump on any incompatible change; an old index is rebuilt rather than migrated.
-const VERSION: i64 = 4;
+/// Bump on any change to the layout. An incompatible change makes old indexes unsupported (they
+/// are rebuilt); an additive one migrates the previous version in place, see [`init`].
+pub(crate) const VERSION: i64 = 5;
 
-const DDL: &str = "
+/// The previous version, migrated to [`VERSION`] by adding [`V5_DDL`].
+pub(crate) const V4: i64 = 4;
+
+pub(crate) const DDL: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS names (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS files (
@@ -65,6 +69,53 @@ CREATE INDEX IF NOT EXISTS bases_derived ON bases (derived_id);
 CREATE INDEX IF NOT EXISTS bases_file ON bases (file_id);
 ";
 
+/// Tables added in schema 5. Additive only: a v4 index gains them without touching its facts.
+const V5_DDL: &str = "
+CREATE TABLE IF NOT EXISTS index_runs (
+    id INTEGER PRIMARY KEY,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    seconds REAL,
+    list_seconds REAL,
+    extract_seconds REAL,
+    files_total INTEGER,
+    extracted INTEGER,
+    reused INTEGER,
+    skipped_large INTEGER,
+    db_bytes_before INTEGER,
+    db_bytes_after INTEGER
+);
+CREATE TABLE IF NOT EXISTS usage (
+    day INTEGER NOT NULL,
+    command TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    total_ms INTEGER NOT NULL DEFAULT 0,
+    max_ms INTEGER NOT NULL DEFAULT 0,
+    h0 INTEGER NOT NULL DEFAULT 0,
+    h1 INTEGER NOT NULL DEFAULT 0,
+    h2 INTEGER NOT NULL DEFAULT 0,
+    h3 INTEGER NOT NULL DEFAULT 0,
+    h4 INTEGER NOT NULL DEFAULT 0,
+    h5 INTEGER NOT NULL DEFAULT 0,
+    h6 INTEGER NOT NULL DEFAULT 0,
+    h7 INTEGER NOT NULL DEFAULT 0,
+    h8 INTEGER NOT NULL DEFAULT 0,
+    h9 INTEGER NOT NULL DEFAULT 0,
+    h10 INTEGER NOT NULL DEFAULT 0,
+    h11 INTEGER NOT NULL DEFAULT 0,
+    hits_total INTEGER NOT NULL DEFAULT 0,
+    zero_hit INTEGER NOT NULL DEFAULT 0,
+    stale_answers INTEGER NOT NULL DEFAULT 0,
+    lab_resolved INTEGER NOT NULL DEFAULT 0,
+    lab_syntactic INTEGER NOT NULL DEFAULT 0,
+    lab_ambiguous INTEGER NOT NULL DEFAULT 0,
+    lab_parse_errors INTEGER NOT NULL DEFAULT 0,
+    lab_compiler INTEGER NOT NULL DEFAULT 0,
+    last_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, command)
+) WITHOUT ROWID;
+";
+
 const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Switches to WAL once. Changing the journal mode needs an exclusive lock and `SQLite` does not
@@ -91,7 +142,23 @@ fn enable_wal(conn: &Connection) -> Result<()> {
     }
 }
 
-pub(crate) fn init(conn: &Connection) -> Result<()> {
+/// The stored schema version: `None` when the key is absent (a fresh database). A value that is
+/// not a number reads as `-1`, so it is reported unsupported rather than overwritten.
+pub(crate) fn stored_version(conn: &Connection) -> Result<Option<i64>> {
+    let found: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(found.map(|v| v.parse::<i64>().unwrap_or(-1)))
+}
+
+/// Prepares a read-write connection and returns the schema version now stored ([`VERSION`]).
+///
+/// A fresh database gets the current schema; a v4 one is migrated in place (new tables plus
+/// `schema = 5`, in one transaction, leaving `extractor`, `commit` and every fact untouched). A
+/// current one is opened without writing, so queries never wait behind a running `index`.
+pub(crate) fn init(conn: &Connection) -> Result<i64> {
     // Concurrent `index` runs (parallel agents) wait for each other rather than fail.
     conn.busy_timeout(BUSY_TIMEOUT)?;
     enable_wal(conn)?;
@@ -101,26 +168,36 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
          PRAGMA cache_size = -262144;",
     )?;
     conn.execute_batch(DDL)?;
-    let found: Option<String> = conn
-        .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    match found.and_then(|v| v.parse::<i64>().ok()) {
-        None => {
-            conn.execute(
-                // Two processes may create the same fresh index at once.
-                "INSERT INTO meta (key, value) VALUES ('schema', ?1) ON CONFLICT(key) DO NOTHING",
-                [VERSION.to_string()],
-            )?;
-        }
-        Some(v) if v != VERSION => {
+    match stored_version(conn)? {
+        Some(VERSION) => Ok(VERSION),
+        None | Some(V4) => migrate(conn),
+        Some(v) => Err(StoreError::SchemaVersion {
+            found: v,
+            expected: VERSION,
+        }),
+    }
+}
+
+/// Brings a fresh or v4 database to [`VERSION`] under the write lock. The version is re-read
+/// inside the transaction: another process may have created or migrated it meanwhile.
+fn migrate(conn: &Connection) -> Result<i64> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    match stored_version(&tx)? {
+        Some(VERSION) => return Ok(VERSION),
+        None | Some(V4) => {}
+        Some(v) => {
             return Err(StoreError::SchemaVersion {
                 found: v,
                 expected: VERSION,
             });
         }
-        Some(_) => {}
     }
-    Ok(())
+    tx.execute_batch(V5_DDL)?;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [VERSION.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(VERSION)
 }
