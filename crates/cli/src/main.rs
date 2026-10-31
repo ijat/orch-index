@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -14,7 +15,7 @@ use oi_git::Repo;
 use oi_indexer::Indexer;
 use oi_model::{Lang, RefKind, SymbolKind};
 use oi_query::{Engine, Freshness, Hit};
-use oi_store::{Filter, Store};
+use oi_store::{Filter, LabelCounts, Store, UsageSample};
 
 #[derive(Parser)]
 #[command(
@@ -213,39 +214,46 @@ fn run() -> Result<()> {
 
 fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
     let engine = Engine::new(store, repo);
-    match command {
+    let started = Instant::now();
+    let (name, what, hits, snippets, out) = match command {
         Command::Def { name, kind, out } => {
             let kinds = kind
                 .iter()
                 .map(|k| SymbolKind::parse(k).with_context(|| format!("unknown kind `{k}`")))
                 .collect::<Result<Vec<_>>>()?;
             let hits = engine.def(&name, &kinds, out.filter())?;
-            print_hits(&engine, &format!("definitions of {name}"), hits, &out, true)?;
+            ("def", format!("definitions of {name}"), hits, true, out)
         }
         Command::Refs { name, kind, out } => {
             let kind = kind
                 .map(|k| RefKind::parse(&k).with_context(|| format!("unknown ref kind `{k}`")))
                 .transpose()?;
             let hits = engine.refs(&name, kind, out.filter())?;
-            print_hits(&engine, &format!("references to {name}"), hits, &out, true)?;
+            ("refs", format!("references to {name}"), hits, true, out)
         }
         Command::Callers { name, out } => {
             let hits = engine.refs(&name, Some(RefKind::Call), out.filter())?;
-            print_hits(&engine, &format!("call sites of {name}"), hits, &out, true)?;
+            ("callers", format!("call sites of {name}"), hits, true, out)
         }
         Command::Includers { file, out } => {
             let hits = engine.includers(&file, out.filter())?;
-            print_hits(&engine, &format!("includers of {file}"), hits, &out, false)?;
+            (
+                "includers",
+                format!("includers of {file}"),
+                hits,
+                false,
+                out,
+            )
         }
         Command::Importers { module, out } => {
             let hits = engine.importers(&module, out.filter())?;
-            print_hits(
-                &engine,
-                &format!("importers of {module}"),
+            (
+                "importers",
+                format!("importers of {module}"),
                 hits,
-                &out,
                 false,
-            )?;
+                out,
+            )
         }
         Command::Overrides {
             method,
@@ -254,19 +262,56 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
             out,
         } => {
             let hits = engine.overrides(&method, base.as_deref(), sig.as_deref(), out.filter())?;
-            print_hits(
-                &engine,
-                &format!("classes with method {method}"),
+            (
+                "overrides",
+                format!("classes with method {method}"),
                 hits,
-                &out,
                 true,
-            )?;
+                out,
+            )
         }
         Command::Index { .. } | Command::Stats | Command::Extract { .. } => {
             unreachable!("not a query")
         }
+    };
+    // Counted over every hit, before the display limit; only the numbers leave this function.
+    let total = hits.len();
+    let mut labels = LabelCounts::default();
+    for h in &hits {
+        labels.add(h.label_class());
     }
+    let stale = print_hits(&engine, &what, hits, &out, snippets)?;
+    record_usage(store, name, started.elapsed(), total, stale, labels);
     Ok(())
+}
+
+/// Adds the query to the usage aggregates. Best-effort: any failure is ignored, and
+/// `ORCH_INDEX_NO_USAGE=1` turns it off. Stores no query text, names or paths.
+fn record_usage(
+    store: &Store,
+    command: &str,
+    elapsed: Duration,
+    hits: usize,
+    stale: bool,
+    labels: LabelCounts,
+) {
+    if std::env::var_os("ORCH_INDEX_NO_USAGE").is_some_and(|v| v == "1") {
+        return;
+    }
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return;
+    };
+    let at = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+    let sample = UsageSample {
+        day: at / 86_400,
+        at,
+        command,
+        ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        hits: hits as u64,
+        stale,
+        labels,
+    };
+    let _ = store.record_usage(&sample);
 }
 
 impl Output {
@@ -291,7 +336,7 @@ fn print_hits(
     mut hits: Vec<Hit>,
     out: &Output,
     snippets: bool,
-) -> Result<()> {
+) -> Result<bool> {
     // Repository text (paths, names, include specs) is untrusted: escape control characters
     // before it reaches an agent's terminal or JSON consumer.
     for h in &mut hits {
@@ -327,7 +372,7 @@ fn print_hits(
             "omitted_by_dir": by_dir(&rest),
         });
         writeln!(stdout, "{}", serde_json::to_string(&doc)?)?;
-        return Ok(());
+        return Ok(fresh.is_stale());
     }
 
     writeln!(stdout, "{total} {what}{}", freshness_note(&fresh))?;
@@ -353,11 +398,11 @@ fn print_hits(
             dirs.join(", ")
         )?;
     }
-    Ok(())
+    Ok(fresh.is_stale())
 }
 
 /// Hits grouped per file (hits arrive sorted by path), with the file's label when all agree.
-fn print_files(engine: &Engine<'_>, what: &str, hits: &[Hit], out: &Output) -> Result<()> {
+fn print_files(engine: &Engine<'_>, what: &str, hits: &[Hit], out: &Output) -> Result<bool> {
     // Grouped by path whatever order the query returned (overrides sorts by class).
     let mut grouped: BTreeMap<&str, (usize, BTreeSet<String>)> = BTreeMap::new();
     for h in hits {
@@ -391,7 +436,7 @@ fn print_files(engine: &Engine<'_>, what: &str, hits: &[Hit], out: &Output) -> R
             "index": fresh, "stale": fresh.is_stale(), "files": rows,
         });
         writeln!(stdout, "{}", serde_json::to_string(&doc)?)?;
-        return Ok(());
+        return Ok(fresh.is_stale());
     }
     writeln!(
         stdout,
@@ -410,7 +455,7 @@ fn print_files(engine: &Engine<'_>, what: &str, hits: &[Hit], out: &Output) -> R
             total_files - shown
         )?;
     }
-    Ok(())
+    Ok(fresh.is_stale())
 }
 
 /// Counts per two-level directory, largest first.

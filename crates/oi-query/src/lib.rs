@@ -12,7 +12,7 @@ use oi_git::{Blob, GitError, Repo};
 /// Blobs larger than this are not read for snippets (indexed files are far smaller).
 const SNIPPET_MAX_BLOB: u64 = 64 << 20;
 use oi_model::{Lang, Provenance, RefKind, SymbolKind, key_of};
-use oi_store::{Filter, Store, StoreError, SymbolHit};
+use oi_store::{Filter, LabelClass, Store, StoreError, SymbolHit};
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +44,22 @@ pub struct Hit {
 }
 
 impl Hit {
+    /// The class this hit counts under in the usage label mix: a parse-error note wins, then an
+    /// ambiguity note (`ambiguous:N`, `basename`), else the provenance. The only place that
+    /// knows the note vocabulary.
+    #[must_use]
+    pub fn label_class(&self) -> LabelClass {
+        match self.note.as_deref() {
+            Some(n) if n.contains("parse-errors") => LabelClass::ParseErrors,
+            Some(n) if n.starts_with("ambiguous") || n == "basename" => LabelClass::Ambiguous,
+            _ => match self.provenance {
+                Provenance::Resolved => LabelClass::Resolved,
+                Provenance::Syntactic => LabelClass::Syntactic,
+                Provenance::Compiler => LabelClass::Compiler,
+            },
+        }
+    }
+
     /// Escapes control characters in every text field (see [`sanitize`]). Call before printing.
     pub fn sanitize(&mut self) {
         for field in [&mut self.path, &mut self.detail] {
@@ -586,6 +602,37 @@ fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(provenance: Provenance, note: Option<&str>) -> Hit {
+        Hit {
+            path: "a.rs".to_owned(),
+            line: 1,
+            provenance,
+            detail: String::new(),
+            note: note.map(str::to_owned),
+            snippet: None,
+            oid: String::new(),
+        }
+    }
+
+    #[test]
+    fn label_classes() {
+        use LabelClass::*;
+        let r = Provenance::Resolved;
+        assert_eq!(hit(r, None).label_class(), Resolved);
+        assert_eq!(hit(r, Some("ambiguous:3")).label_class(), Ambiguous);
+        assert_eq!(
+            hit(Provenance::Syntactic, Some("basename")).label_class(),
+            Ambiguous
+        );
+        assert_eq!(hit(r, Some("parse-errors")).label_class(), ParseErrors);
+        assert_eq!(
+            hit(r, Some("ambiguous:2+parse-errors")).label_class(),
+            ParseErrors
+        );
+        assert_eq!(hit(Provenance::Syntactic, None).label_class(), Syntactic);
+        assert_eq!(hit(Provenance::Compiler, None).label_class(), Compiler);
+    }
 
     #[test]
     fn script_imports_resolve_without_extension() {

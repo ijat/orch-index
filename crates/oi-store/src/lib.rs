@@ -5,6 +5,7 @@
 
 mod lock;
 mod schema;
+mod usage;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -16,6 +17,10 @@ use rusqlite::{
 };
 
 pub use lock::{IndexLock, is_indexing, lock_path};
+pub use usage::{
+    LATENCY_BOUNDS_MS, LATENCY_BUCKETS, LabelClass, LabelCounts, LatencyStats, UsageSample,
+    UsageSummary, latency_bucket,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
