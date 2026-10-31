@@ -389,6 +389,7 @@ dependencies = [
  "oi-query",
  "oi-store",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

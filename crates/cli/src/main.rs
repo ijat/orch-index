@@ -17,6 +17,8 @@ use oi_model::{Lang, RefKind, SymbolKind};
 use oi_query::{Engine, Freshness, Hit};
 use oi_store::{Filter, LabelCounts, Store, UsageSample};
 
+mod status;
+
 #[derive(Parser)]
 #[command(
     name = "orch-index",
@@ -65,6 +67,13 @@ enum Command {
     },
     /// Row counts and the indexed commit.
     Stats,
+    /// Index health: state, commits behind, counts, last runs, query usage. Read-only; never
+    /// creates the index.
+    Status {
+        /// Print one JSON object (schema 1) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Debug: print the facts extracted from one file on disk, as JSON lines.
     #[command(hide = true)]
     Extract {
@@ -155,6 +164,10 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
+    // `status` never creates the database or its directory, so it branches before they exist.
+    if let Command::Status { json } = &cli.command {
+        return status::run(&repo, cli.db.as_deref(), *json);
+    }
     // Only now touch the repository: `extract` above works on any file, anywhere.
     let db = if let Some(p) = cli.db {
         p
@@ -189,7 +202,9 @@ fn run() -> Result<()> {
                 stats.extract_time.as_secs_f64()
             );
         }
-        Command::Extract { .. } => unreachable!("handled before opening the store"),
+        Command::Extract { .. } | Command::Status { .. } => {
+            unreachable!("handled before opening the store")
+        }
         Command::Stats => {
             println!(
                 "commit {}",
@@ -270,7 +285,10 @@ fn run_query(store: &Store, repo: &Repo, command: Command) -> Result<()> {
                 out,
             )
         }
-        Command::Index { .. } | Command::Stats | Command::Extract { .. } => {
+        Command::Index { .. }
+        | Command::Stats
+        | Command::Status { .. }
+        | Command::Extract { .. } => {
             unreachable!("not a query")
         }
     };
