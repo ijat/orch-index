@@ -55,7 +55,7 @@ Each [GitHub Release](https://github.com/ijat/orch-index/releases) has archives 
 macOS and Linux:
 
 ```sh
-VERSION=v0.1.0
+VERSION=v0.2.0
 TARGET=aarch64-apple-darwin     # pick a target from the table
 BASE=https://github.com/ijat/orch-index/releases/download/$VERSION
 ARCHIVE=orch-index-$VERSION-$TARGET.tar.gz
@@ -71,7 +71,7 @@ orch-index --version
 Windows (PowerShell):
 
 ```powershell
-$Version = "v0.1.0"
+$Version = "v0.2.0"
 $Archive = "orch-index-$Version-x86_64-pc-windows-msvc.zip"
 Invoke-WebRequest "https://github.com/ijat/orch-index/releases/download/$Version/$Archive" -OutFile $Archive
 Expand-Archive $Archive -DestinationPath .

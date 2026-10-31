@@ -300,7 +300,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "oi-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oi-model",
  "thiserror",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "oi-indexer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oi-git",
  "oi-lang",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "oi-lang"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oi-model",
  "serde",
@@ -337,14 +337,14 @@ dependencies = [
 
 [[package]]
 name = "oi-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "oi-query"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oi-git",
  "oi-lang",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "oi-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "oi-model",
  "rusqlite",
@@ -378,7 +378,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "orch-index"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",

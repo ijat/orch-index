@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-oi-model = { version = "0.1.0", path = "../oi-model" }
+oi-model = { version = "0.2.0", path = "../oi-model" }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 thiserror = "2.0.21"
 

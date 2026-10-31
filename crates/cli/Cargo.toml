@@ -11,12 +11,12 @@ description = "Build-free structural code index for large git repositories: defi
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
-oi-git = { version = "0.1.0", path = "../oi-git" }
-oi-indexer = { version = "0.1.0", path = "../oi-indexer" }
-oi-lang = { version = "0.1.0", path = "../oi-lang" }
-oi-model = { version = "0.1.0", path = "../oi-model" }
-oi-query = { version = "0.1.0", path = "../oi-query" }
-oi-store = { version = "0.1.0", path = "../oi-store" }
+oi-git = { version = "0.2.0", path = "../oi-git" }
+oi-indexer = { version = "0.2.0", path = "../oi-indexer" }
+oi-lang = { version = "0.2.0", path = "../oi-lang" }
+oi-model = { version = "0.2.0", path = "../oi-model" }
+oi-query = { version = "0.2.0", path = "../oi-query" }
+oi-store = { version = "0.2.0", path = "../oi-store" }
 serde_json = "1.0.154"
 
 [dev-dependencies]

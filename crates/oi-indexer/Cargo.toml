@@ -6,10 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-oi-git = { version = "0.1.0", path = "../oi-git" }
-oi-lang = { version = "0.1.0", path = "../oi-lang" }
-oi-model = { version = "0.1.0", path = "../oi-model" }
-oi-store = { version = "0.1.0", path = "../oi-store" }
+oi-git = { version = "0.2.0", path = "../oi-git" }
+oi-lang = { version = "0.2.0", path = "../oi-lang" }
+oi-model = { version = "0.2.0", path = "../oi-model" }
+oi-store = { version = "0.2.0", path = "../oi-store" }
 rayon = "1.12.0"
 thiserror = "2.0.21"
 
