@@ -20,6 +20,7 @@ oi-store = { version = "0.2.0", path = "../oi-store" }
 serde_json = "1.0.154"
 
 [dev-dependencies]
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 tempfile = "3.27.0"
 
 [lints]

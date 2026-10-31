@@ -226,6 +226,56 @@ fn usage_counts_queries_not_status_runs() {
 }
 
 #[test]
+fn old_schemas_report_null_counts_and_outdated_without_migrating() {
+    let tmp = fixture();
+    let d = tmp.path();
+    let db = d.join("old.db");
+    let set_schema = |v: &str| {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE meta SET value = ?1 WHERE key = 'schema'", [v])
+            .unwrap();
+    };
+    let schema = || -> String {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let at_db = |d: &Path| -> Value {
+        let out = run(d, &["--db", db.to_str().unwrap(), "status", "--json"], &[]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+             INSERT INTO meta VALUES ('schema', '4'), ('commit', 'abc'), ('extractor', 'old');",
+        )
+        .unwrap();
+    }
+    let v = at_db(d);
+    assert!(v["counts"].is_null());
+    for key in ["last_index", "history", "usage"] {
+        assert!(v.get(key).is_none(), "{key} present on a v4 db");
+    }
+    assert_eq!(schema(), "4", "status must not migrate");
+
+    set_schema("3");
+    let v = at_db(d);
+    assert_eq!(v["state"], "outdated");
+    assert!(v["counts"].is_null());
+    assert!(v["indexed_commit"].is_null());
+    assert_eq!(schema(), "3");
+}
+
+#[test]
 fn held_index_lock_shows_indexing() {
     let tmp = fixture();
     index(tmp.path());

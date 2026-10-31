@@ -388,6 +388,7 @@ dependencies = [
  "oi-model",
  "oi-query",
  "oi-store",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]

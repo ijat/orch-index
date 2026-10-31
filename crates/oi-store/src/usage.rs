@@ -153,19 +153,35 @@ fn to_u64(v: i64) -> u64 {
 
 impl Store {
     /// Adds one query to its (day, command) row and drops days older than the retention window.
-    /// Best-effort: the busy timeout is 0 for the call (restored after), so a database that is
-    /// being written fails at once instead of making a query wait.
+    /// Best-effort: for the call the busy timeout is 0 and WAL auto-checkpointing is off (both
+    /// restored after), so a database that is being written fails at once and the commit never
+    /// does checkpoint I/O inherited from a large `index` write; a query is never made to wait.
     pub fn record_usage(&self, s: &UsageSample<'_>) -> Result<()> {
-        let previous: i64 = self
+        let previous_timeout: i64 = self
             .conn
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?;
-        self.conn.busy_timeout(Duration::ZERO)?;
-        let result = self.record_usage_inner(s);
-        let restored = self
+        let previous_checkpoint: i64 =
+            self.conn
+                .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))?;
+        let result = self
             .conn
-            .busy_timeout(Duration::from_millis(to_u64(previous)));
+            .busy_timeout(Duration::ZERO)
+            .map_err(Into::into)
+            .and_then(|()| {
+                self.conn
+                    .pragma_update(None, "wal_autocheckpoint", 0)
+                    .map_err(Into::into)
+            })
+            .and_then(|()| self.record_usage_inner(s));
+        let restored_checkpoint =
+            self.conn
+                .pragma_update(None, "wal_autocheckpoint", previous_checkpoint);
+        let restored_timeout = self
+            .conn
+            .busy_timeout(Duration::from_millis(to_u64(previous_timeout)));
         result?;
-        restored?;
+        restored_checkpoint?;
+        restored_timeout?;
         Ok(())
     }
 
@@ -392,6 +408,31 @@ mod tests {
         assert!(after > 0);
         other.execute_batch("ROLLBACK").unwrap();
         store.record_usage(&sample(20_000, "def", 1, 1)).unwrap();
+    }
+
+    #[test]
+    fn usage_write_restores_wal_autocheckpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("i.db");
+        let store = Store::open(&path).unwrap();
+        let read = |store: &Store| -> i64 {
+            store
+                .conn
+                .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
+                .unwrap()
+        };
+        store
+            .conn
+            .pragma_update(None, "wal_autocheckpoint", 37)
+            .unwrap();
+        assert_eq!(read(&store), 37);
+        store.record_usage(&sample(20_000, "def", 1, 1)).unwrap();
+        assert_eq!(read(&store), 37, "restored after success");
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(store.record_usage(&sample(20_000, "def", 1, 1)).is_err());
+        assert_eq!(read(&store), 37, "restored after a busy error");
+        other.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
