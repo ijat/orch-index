@@ -4,14 +4,15 @@
 //! stored, so the first run and every later update take the same path.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::mpsc::sync_channel;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use oi_git::{Blob, GitError, Repo, TreeEntry};
 use oi_lang::Registry;
 use oi_model::{FileFacts, Lang};
-use oi_store::{Store, StoreError};
+use oi_store::{IndexRun, Store, StoreError};
 use rayon::iter::{ParallelBridge, ParallelIterator};
 
 pub use oi_lang::EXTRACTOR_VERSION;
@@ -33,6 +34,8 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 #[derive(Debug, Clone, Default)]
 pub struct UpdateStats {
     pub commit: String,
+    /// The store had no files before this run, or was built by a different extractor.
+    pub full: bool,
     pub tree_files: usize,
     pub indexable: usize,
     pub unchanged: usize,
@@ -47,6 +50,27 @@ pub struct UpdateStats {
     pub list_time: Duration,
     pub extract_time: Duration,
     pub total_time: Duration,
+}
+
+/// Size of the database file plus its WAL; 0 for whatever is absent.
+fn db_bytes(db: &Path) -> i64 {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    [db, Path::new(&wal)]
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| to_i64(m.len()))
+        .sum()
+}
+
+fn to_i64(n: impl TryInto<i64>) -> i64 {
+    n.try_into().unwrap_or(i64::MAX)
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| to_i64(d.as_secs()))
 }
 
 pub struct Indexer {
@@ -84,7 +108,11 @@ impl Indexer {
     }
 
     /// Brings `store` up to date with `rev` (usually `HEAD`).
+    ///
+    /// Holds the store's index lock (`<db>.lock`) for the whole call, released on return.
     pub fn update(&self, store: &mut Store, rev: &str) -> Result<UpdateStats> {
+        let _lock = store.index_lock()?;
+        let db_bytes_before = store.path().map_or(0, db_bytes);
         let start = Instant::now();
         let mut stats = UpdateStats {
             commit: self.repo.rev_parse(rev)?,
@@ -100,6 +128,7 @@ impl Indexer {
         // An index built by a different extractor is stale for every file, whatever its blob id.
         let same_extractor = writer.meta("extractor")?.as_deref() == Some(EXTRACTOR_VERSION);
         let indexed = writer.files()?;
+        stats.full = indexed.is_empty() || !same_extractor;
 
         let mut todo: Vec<(TreeEntry, Lang)> = Vec::new();
         let mut live: HashSet<&str> = HashSet::new();
@@ -133,9 +162,23 @@ impl Indexer {
         self.extract_into(todo, &mut writer, &mut stats)?;
         writer.set_meta("commit", &stats.commit)?;
         writer.set_meta("extractor", EXTRACTOR_VERSION)?;
+        writer.refresh_counts()?;
         writer.commit()?;
         stats.extract_time = extract_start.elapsed();
         stats.total_time = start.elapsed();
+        store.record_index_run(&IndexRun {
+            at: unix_now(),
+            kind: if stats.full { "full" } else { "incremental" }.to_owned(),
+            seconds: Some(stats.total_time.as_secs_f64()),
+            list_seconds: Some(stats.list_time.as_secs_f64()),
+            extract_seconds: Some(stats.extract_time.as_secs_f64()),
+            files_total: Some(to_i64(stats.tree_files)),
+            extracted: Some(to_i64(stats.extracted)),
+            reused: Some(to_i64(stats.unchanged)),
+            skipped_large: Some(to_i64(stats.skipped_large)),
+            db_bytes_before: Some(db_bytes_before),
+            db_bytes_after: Some(store.path().map_or(0, db_bytes)),
+        })?;
         Ok(stats)
     }
 

@@ -89,6 +89,38 @@ impl Repo {
         Ok(PathBuf::from(String::from_utf8_lossy(&out).trim()))
     }
 
+    /// The working tree's top-level directory, absolute.
+    pub fn toplevel(&self) -> Result<PathBuf> {
+        let out = self.run(&["rev-parse", "--show-toplevel"])?;
+        Ok(PathBuf::from(String::from_utf8_lossy(&out).trim()))
+    }
+
+    /// Whether commit `a` is an ancestor of (or equal to) commit `b`. Pass full commit ids.
+    pub fn is_ancestor(&self, a: &str, b: &str) -> Result<bool> {
+        let out = self
+            .git()
+            .args(["merge-base", "--is-ancestor", a, b])
+            .output()?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitError::Command {
+                args: format!("merge-base --is-ancestor {a} {b}"),
+                stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            }),
+        }
+    }
+
+    /// The number of commits reachable from `b` but not from `a` (`rev-list --count a..b`).
+    pub fn count_range(&self, a: &str, b: &str) -> Result<u64> {
+        let range = format!("{a}..{b}");
+        let out = self.run(&["rev-list", "--count", &range])?;
+        let text = String::from_utf8_lossy(&out);
+        text.trim()
+            .parse()
+            .map_err(|_| GitError::Protocol(format!("rev-list --count printed {:?}", text.trim())))
+    }
+
     /// Lists every blob reachable from `rev`, recursively. Symlinks and submodules are skipped,
     /// and so are paths that are not valid UTF-8 (counted in [`Tree::skipped_non_utf8`]): lossy
     /// decoding would make distinct paths collide. Sizes are not listed (`-l` triples the cost
