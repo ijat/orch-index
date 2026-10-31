@@ -61,3 +61,8 @@ the tool works.
 - 2026-10-31: reviews done. Diff review (9 findings), whole-repo correctness review (8 + 2 likely)
   and security review (5 confirmed + hardening) all fixed with tests; no injection holes found
   (git args, SQL). Firefox/Chromium re-checked at the benchmarked commits: 8/8 exact, no-op update 0.75 s.
+- 2026-10-31: `orch-index status --json` (schema 1, `docs/STATUS-JSON-REQUIREMENTS.md`) for orch-pane.
+  Store schema 4 -> 5, migrated in place (new `index_runs` and `usage` tables; the extractor version is
+  unchanged, so existing indexes do not become `outdated`). `index` holds `<db>.lock`, caches counts and
+  records a run; the six query commands add per-day aggregates (no query text), off with
+  `ORCH_INDEX_NO_USAGE=1`.
