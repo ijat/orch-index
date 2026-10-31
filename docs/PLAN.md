@@ -62,3 +62,8 @@ the tool works.
   and security review (5 confirmed + hardening) all fixed with tests; no injection holes found
   (git args, SQL). Firefox/Chromium re-checked at the benchmarked commits: 8/8 exact, no-op update 0.75 s.
 - 2026-10-31: M5 done. orch-skill task `orch-graph-role` merged (f0c33b5): `orch-graph` role = index maintainer (check/rebuild), `orch-explorer` is the only query role (unconditional first command, ancestor rule + delta search, indexing marker), docs, LEDGER row. Probes old vs new on small repos: correct everywhere; the index costs +20-52% vs grep there (large-repo payoff rests on the Firefox/Chromium bench). Follow-ups for this repo: `stats` must not create `index.db`; print the older-extractor note even when behind HEAD; `callers` missed a C# method-group use (`.Select(NormalizePath)`).
+- 2026-10-31: `orch-index status --json` (schema 1, `docs/STATUS-JSON-REQUIREMENTS.md`) for orch-pane.
+  Store schema 4 -> 5, migrated in place (new `index_runs` and `usage` tables; the extractor version is
+  unchanged, so existing indexes do not become `outdated`). `index` holds `<db>.lock`, caches counts and
+  records a run; the six query commands add per-day aggregates (no query text), off with
+  `ORCH_INDEX_NO_USAGE=1`.

@@ -55,7 +55,7 @@ Each [GitHub Release](https://github.com/ijat/orch-index/releases) has archives 
 macOS and Linux:
 
 ```sh
-VERSION=v0.1.0
+VERSION=v0.2.0
 TARGET=aarch64-apple-darwin     # pick a target from the table
 BASE=https://github.com/ijat/orch-index/releases/download/$VERSION
 ARCHIVE=orch-index-$VERSION-$TARGET.tar.gz
@@ -71,7 +71,7 @@ orch-index --version
 Windows (PowerShell):
 
 ```powershell
-$Version = "v0.1.0"
+$Version = "v0.2.0"
 $Archive = "orch-index-$Version-x86_64-pc-windows-msvc.zip"
 Invoke-WebRequest "https://github.com/ijat/orch-index/releases/download/$Version/$Archive" -OutFile $Archive
 Expand-Archive $Archive -DestinationPath .
@@ -130,6 +130,7 @@ orch-index importers internal/validators          # module imports: Rust use, C#
 orch-index overrides OnStartRequest --sig "(nsIRequest*)" --path netwerk/
 orch-index refs nsIRequest --kind type --path dom/
 orch-index stats
+orch-index status --json               # index health for scripts and dashboards; read-only
 ```
 
 | Command | Answers |
@@ -142,6 +143,7 @@ orch-index stats
 | `importers MODULE` | Files importing a module or namespace: Rust `use`, C# `using`, JS/TS packages. |
 | `overrides METHOD` | Classes declaring or defining a method, one row per class. `--sig "(nsIRequest*)"` restricts the parameter list; `--base CLASS` keeps classes deriving (transitively) from `CLASS`. |
 | `stats` | Row counts and the indexed commit. |
+| `status` | Index health: `state` (`none`, `current`, `stale`, `outdated`), commits behind `HEAD`, cached counts, recent index runs, query usage. `--json` prints one JSON object (`schema` 1); without it, a few text lines. Read-only. |
 
 Common flags: `--path PREFIX`, `--lang cpp|rust|javascript|typescript|csharp`, `--limit N` (default
 30; the rest is summarized per directory; `0` = no limit), `--files` (one row per file), `--json`,
@@ -189,6 +191,40 @@ source line comes from the indexed blob.
 Concurrent `index` runs on one index wait for each other. The index records which extractor
 version built it: after an upgrade, queries report the index as stale until `orch-index index`
 runs again.
+
+### Health and usage data
+
+`orch-index status --json` is a cheap health report meant for polling. It opens the database
+read-only and never creates it, its directory or the lock file, walks no tree and scans no table, and
+exits 0 with `"state":"none"` when there is no index. It fails (non-zero exit) only when the
+directory is not inside a git repository. It reports:
+- `state`: `none` (no index), `current`, `stale` (the indexed commit differs from `HEAD`) or
+  `outdated` (built by a different extractor version, or an unsupported schema; `outdated` wins over
+  `stale`), plus `commits_behind` (`null` when the indexed commit is not an ancestor of `HEAD`);
+- `indexing`: whether an `index` run is in progress;
+- the indexed and `HEAD` commits, extractor versions, database size, row counts, files per language and
+  files with parse errors;
+- the last `index` run (kind `full` or `incremental`, timings, files extracted and reused) and the
+  last 10 runs;
+- query `usage` over the last 7 days: query count, per-command p50/p95 latency, share of queries with
+  no hits, share answered while the index was behind or outdated, and the mix of trust labels.
+
+Field names and meanings are in `docs/STATUS-JSON-REQUIREMENTS.md`. Counts, languages and run records
+are written by `orch-index index`, so an index built before this feature reports `null` counts until
+its next `index` run. That run also counts every table once at the end, which adds an estimated
+0.1-0.3 s at Chromium size (not measured separately).
+
+The six query commands (`def`, `callers`, `includers`, `importers`, `overrides`, `refs`) record usage
+in the index database: one aggregate row per UTC day and command (counts, a latency histogram, hit
+counts, label counts), kept for 30 days. No query text, symbol names or paths are stored. Recording is
+best-effort and never delays or fails a query: if the database is being written (for example by a
+running `index`), that query's sample is dropped, so counts can undercount while an update runs.
+`status` itself records nothing. Set `ORCH_INDEX_NO_USAGE=1` to turn recording off; `status` then
+omits `usage` as well.
+
+While `index` runs it holds an advisory lock on a file next to the database, `<db>.lock` (for the
+default location, `<git-common-dir>/orch-index/index.db.lock`). The file stays after the run; the
+lock is what `status` checks.
 
 ## Robustness
 

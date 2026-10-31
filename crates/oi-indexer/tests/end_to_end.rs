@@ -414,3 +414,77 @@ fn review_regressions() {
     assert_eq!(inc.len(), 1, "{inc:#?}");
     assert!(!engine.freshness().unwrap().is_stale());
 }
+
+#[test]
+fn index_runs_cached_counts_and_lock() {
+    let tmp = fixture();
+    let repo = Repo::new(tmp.path());
+    let db_dir = tempfile::tempdir().unwrap();
+    let db = db_dir.path().join("index.db");
+    let mut store = Store::open(&db).unwrap();
+    let indexer = Indexer::new(repo);
+
+    let first = indexer.update(&mut store, "HEAD").unwrap();
+    assert!(first.full);
+    // A sibling test thread may be between fork and exec of a `git` child, which briefly shares
+    // the lock's open file description; the lock is gone once that child has exec'd.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while oi_store::is_indexing(&db) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lock not released after update"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let runs = store.index_runs(10).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].kind, "full");
+    assert_eq!(runs[0].extracted, Some(5));
+    assert!(runs[0].db_bytes_after.unwrap() > 0);
+
+    let second = indexer.update(&mut store, "HEAD").unwrap();
+    assert!(!second.full);
+    let runs = store.index_runs(10).unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].kind, "incremental");
+    assert_eq!(runs[0].extracted, Some(0));
+    assert_eq!(runs[0].reused, Some(5));
+    assert_eq!(runs[1].kind, "full");
+
+    // The cache equals a live count.
+    let cached = store.cached_counts().unwrap().expect("counts cached");
+    let live: std::collections::HashMap<_, _> = store.counts().unwrap().into_iter().collect();
+    assert_eq!(cached.files, live["files"]);
+    assert_eq!(cached.symbols, live["symbols"]);
+    assert_eq!(cached.refs, live["refs"]);
+    assert_eq!(cached.includes, live["includes"]);
+    assert_eq!(cached.bases, live["bases"]);
+    assert_eq!(cached.names, live["names"]);
+    let (errors, structural) = store.files_with_errors().unwrap();
+    assert_eq!(
+        (cached.parse_error_files, cached.parse_error_structural),
+        (errors, structural)
+    );
+    assert_eq!(cached.languages.values().sum::<i64>(), cached.files);
+}
+
+#[test]
+fn git_ancestry_helpers() {
+    let tmp = fixture();
+    let d = tmp.path();
+    let repo = Repo::new(d);
+    let first = repo.rev_parse("HEAD").unwrap();
+    write(d, "README.md", "changed\n");
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-q", "-m", "two"]);
+    let second = repo.rev_parse("HEAD").unwrap();
+
+    assert!(repo.is_ancestor(&first, &second).unwrap());
+    assert!(!repo.is_ancestor(&second, &first).unwrap());
+    assert!(repo.is_ancestor(&first, &first).unwrap());
+    assert_eq!(repo.count_range(&first, &second).unwrap(), 1);
+    assert_eq!(repo.count_range(&second, &first).unwrap(), 0);
+    assert_eq!(repo.toplevel().unwrap(), d.canonicalize().unwrap());
+    // An unknown revision is an error, not "false".
+    assert!(repo.is_ancestor(&first, &"0".repeat(40)).is_err());
+}
